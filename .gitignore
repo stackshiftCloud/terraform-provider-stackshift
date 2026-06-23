@@ -1,0 +1,17 @@
+.DS_Store
+.terraform/
+.terraform.lock.hcl
+crash.log
+crash.*.log
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+terraform-provider-stackshift
+terraform-provider-stackshift_v*
+dist/
+bin/

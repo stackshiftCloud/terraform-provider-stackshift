@@ -1,0 +1,46 @@
+version: 2
+
+project_name: terraform-provider-stackshift
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: terraform-provider-stackshift
+    main: .
+    binary: terraform-provider-stackshift_v{{ .Version }}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: provider
+    builds:
+      - terraform-provider-stackshift
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - zip
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
+
+signs:
+  - artifacts: checksum
+    args:
+      - "--batch"
+      - "--local-user"
+      - "{{ .Env.GPG_FINGERPRINT }}"
+      - "--output"
+      - "${signature}"
+      - "--detach-sign"
+      - "${artifact}"
+
+release:
+  draft: false
