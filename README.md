@@ -10,7 +10,7 @@ After the provider is published to the Terraform Registry:
 terraform {
   required_providers {
     stackshift = {
-      source  = "stackshift/stackshift"
+      source  = "stackshiftCloud/stackshift"
       version = "~> 0.1"
     }
   }
@@ -44,7 +44,7 @@ Point Terraform at the local build with `~/.terraformrc`:
 ```hcl
 provider_installation {
   dev_overrides {
-    "registry.terraform.io/stackshift/stackshift" = "/path/to/terraform-provider-stackshift"
+    "registry.terraform.io/stackshiftCloud/stackshift" = "/path/to/terraform-provider-stackshift"
   }
 
   direct {}

@@ -1,7 +1,7 @@
 terraform {
   required_providers {
     stackshift = {
-      source = "stackshift/stackshift"
+      source = "stackshiftCloud/stackshift"
     }
   }
 }

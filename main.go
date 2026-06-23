@@ -10,7 +10,7 @@ import (
 
 func main() {
 	err := providerserver.Serve(context.Background(), provider.New, providerserver.ServeOpts{
-		Address: "registry.terraform.io/stackshift/stackshift",
+		Address: "registry.terraform.io/stackshiftCloud/stackshift",
 	})
 	if err != nil {
 		log.Fatal(err)

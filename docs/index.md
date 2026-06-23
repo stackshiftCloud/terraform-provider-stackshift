@@ -76,7 +76,7 @@ Add a Terraform CLI config file at `~/.terraformrc`:
 ```hcl
 provider_installation {
   dev_overrides {
-    "registry.terraform.io/stackshift/stackshift" = "/Users/jessejosiah/Startup/terraform-provider-stackshift"
+    "registry.terraform.io/stackshiftCloud/stackshift" = "/Users/jessejosiah/Startup/terraform-provider-stackshift"
   }
   direct {}
 }
@@ -88,7 +88,7 @@ Then use the provider in a Terraform project:
 terraform {
   required_providers {
     stackshift = {
-      source = "stackshift/stackshift"
+      source = "stackshiftCloud/stackshift"
     }
   }
 }
