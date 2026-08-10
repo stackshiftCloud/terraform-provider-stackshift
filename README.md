@@ -1,6 +1,8 @@
 # Terraform Provider for StackShift
 
-Use this provider to manage StackShift projects, environment variables, databases, domains, DNS records, build/deployment actions, compute instances, agency resources, and runbooks from Terraform or OpenTofu.
+Use this provider to manage StackShift projects, environment variables, databases, S2 object-storage buckets, domains, DNS records, build/deployment actions, compute instances, agency resources, and runbooks from Terraform or OpenTofu.
+
+S2 returns a bucket secret access key only when the bucket is created. The provider marks it sensitive, but Terraform still stores it in state. Use encrypted remote state with tightly scoped access.
 
 ## Install
 

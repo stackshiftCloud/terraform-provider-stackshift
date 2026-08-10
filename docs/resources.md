@@ -239,6 +239,27 @@ Triggers a runbook execution when the resource is created.
 | `reason` | no | Human-readable reason. |
 | `nonce` | no | Optional uniqueness key for repeated executions. |
 
-## Bucket Stub
+## `stackshift_bucket`
 
-`stackshift_bucket` exists only as a source stub and is not registered in the provider. It should be wired only after the StackShift S3-compatible store endpoints exist.
+Manages an S3-compatible StackShift S2 bucket through `/api/v1/buckets`.
+
+The API creates one bucket-scoped access key with the bucket. Its secret is returned once and stored in sensitive Terraform state. Protect state with encryption and restricted access. Import can recover the bucket configuration, but it cannot recover an existing secret access key.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `name` | yes | Globally unique S3 bucket name; replacing it creates a new bucket. |
+| `region` | yes | S2 signing region returned to S3 clients. |
+| `visibility` | no | `private` by default; changes replace the bucket. |
+| `project_id` | no | Optional owning StackShift project; changes replace the bucket. |
+| `access_key_label` | no | Label for the initial bucket-scoped access key. |
+| `force_destroy` | no | Defaults to `false`; when true, destroy also removes contained objects. |
+
+Computed attributes include `endpoint`, `access_key_id`, `secret_access_key`, `object_count`, `size_bytes`, `created_at`, and `updated_at`.
+
+### Import
+
+```sh
+terraform import stackshift_bucket.uploads <bucket_id>
+```

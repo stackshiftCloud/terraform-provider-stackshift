@@ -85,6 +85,7 @@ func (p *stackshiftProvider) Resources(_ context.Context) []func() resource.Reso
 		NewProjectResource,
 		NewProjectEnvResource,
 		NewDatabaseResource,
+		NewBucketResource,
 		NewDomainResource,
 		NewDNSRecordResource,
 		NewBuildActionResource,
