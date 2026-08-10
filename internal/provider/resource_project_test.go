@@ -27,7 +27,7 @@ func TestAccProjectResource(t *testing.T) {
 			},
 			{
 				Config: testAccProjectConfig(updated),
-				Check: resource.TestCheckResourceAttr("stackshift_project.test", "name", updated),
+				Check:  resource.TestCheckResourceAttr("stackshift_project.test", "name", updated),
 			},
 			{
 				ResourceName:      "stackshift_project.test",

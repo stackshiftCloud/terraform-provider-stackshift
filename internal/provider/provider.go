@@ -92,10 +92,21 @@ func (p *stackshiftProvider) Resources(_ context.Context) []func() resource.Reso
 		NewDeploymentActionResource,
 		NewComputeInstanceResource,
 		NewComputeActionResource,
+		NewBYOCProviderConnectionResource,
+		NewBYOCNodeResource,
+		NewBYOCVolumeResource,
+		NewBYOCSnapshotResource,
+		NewBYOCStaticIPResource,
 		NewAgencyClientResource,
 		NewAgencyResourceAssignmentResource,
 		NewRunbookResource,
 		NewRunbookExecutionResource,
+		NewAssetBucketResource,
+		NewAssetWebhookResource,
+		NewAssetLifecycleRuleResource,
+		NewAssetDomainResource,
+		NewAssetTransformationResource,
+		NewAssetContentPolicyResource,
 	}
 }
 
@@ -104,5 +115,8 @@ func (p *stackshiftProvider) DataSources(_ context.Context) []func() datasource.
 		NewProjectDataSource,
 		NewDatabaseDataSource,
 		NewDatabaseCredentialsDataSource,
+		NewAssetDataSource,
+		NewAssetJobDataSource,
+		NewAssetAnalyticsDataSource,
 	}
 }

@@ -239,6 +239,55 @@ Triggers a runbook execution when the resource is created.
 | `reason` | no | Human-readable reason. |
 | `nonce` | no | Optional uniqueness key for repeated executions. |
 
+## `stackshift_asset_bucket`
+
+Manages an Assets bucket, including visibility, upload policy, CORS, replication, lifecycle JSON, and an optional custom domain association.
+
+## `stackshift_asset_webhook`
+
+Manages a signed Assets event subscription. The `secret` attribute is sensitive and is returned only at creation time; retain the Terraform state securely.
+
+## `stackshift_asset_lifecycle_rule`
+
+Manages an immutable lifecycle rule. `action` is `delete` or `expire_versions`; changing the name, prefix, action, age, or enabled state replaces the rule because the API intentionally exposes create/list/delete semantics.
+
+## `stackshift_asset_domain`
+
+Manages a custom Assets delivery domain. Apply first with `verify = false`, publish `verification_name` and `verification_value` in DNS, then set `verify = true` to invoke ownership verification and TLS provisioning on the next apply.
+
+## `stackshift_byoc_provider_connection`
+
+Manages one clean-contract BYOCloud provider identity and validates it during apply by default.
+
+- `provider = "hetzner"` or `"digitalocean"` requires `token`. Use a provider-scoped read/write token.
+- `provider = "aws"` requires `role_arn` and `region`. StackShift returns `external_id`; put that exact value in the IAM role trust policy. AWS access keys are not accepted.
+- `provider = "azure"` requires `azure_tenant_id`, `azure_subscription_id`, and `azure_client_id`. Configure the issuer, subject, and audience returned by StackShift on the Azure federated credential. Client secrets are not accepted.
+- `missing_permissions` contains the exact failed permission checks when validation fails.
+
+Provider credentials are sensitive but remain Terraform inputs, so protect remote state with encryption and strict access control. Imported connections can be read without credentials, but credentials must be supplied before changing or revalidating them.
+
+## `stackshift_byoc_node`
+
+Provisions a provider-backed node and waits for the durable provisioning operation to become `active`. The provider resource is discovered by StackShift tags after ambiguous provider responses, so a repeated apply with the same state does not create a duplicate instance. Destroy starts the durable deletion saga and waits until the provider confirms deletion. A `409` deletion blocker is returned to Terraform when projects, stacks, databases, volumes, or dependent snapshots remain.
+
+Required fields are `provider_connection_id`, `provider`, `region`, `tier_slug`, and `name`. When omitted, `idempotency_key` is deterministically derived from the immutable resource identity and then persisted, so a Terraform process crash cannot turn a retry into a second provider resource. Read-only fields expose operation progress, bootstrap state, enrollment state, overlay address, public address, and failure details.
+
+## `stackshift_byoc_volume`
+
+Creates and attaches a provider-backed volume to a BYOCloud node, then polls the node-scoped resource inventory until it is attached. `node_id`, `name`, `size_gb`, `mount_path`, and `filesystem` describe the immutable attachment. Destroy is refused while dependent snapshots exist.
+
+Import with `NODE_ID:VOLUME_ID`.
+
+## `stackshift_byoc_snapshot`
+
+Creates an inventoried provider snapshot and waits for it to become available. Destroy waits until the snapshot disappears from the node inventory.
+
+Import with `NODE_ID:SNAPSHOT_ID`.
+
+## `stackshift_byoc_static_ip`
+
+Allocates and assigns a stable public IP to a BYOCloud node. Destroy releases the address through the provider-confirmed durable operation. The resource exposes the provider resource ID, address, assignment status, and last synchronization time.
+
 ## `stackshift_bucket`
 
 Manages an S3-compatible StackShift S2 bucket through `/api/v1/buckets`.

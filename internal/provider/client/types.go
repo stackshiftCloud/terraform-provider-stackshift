@@ -17,6 +17,135 @@ type GenericActionResult struct {
 	Raw          json.RawMessage `json:"-"`
 }
 
+type AssetBucket struct {
+	ID                string          `json:"id"`
+	Name              string          `json:"name"`
+	DefaultVisibility string          `json:"default_visibility"`
+	CacheControl      *string         `json:"cache_control,omitempty"`
+	Versioning        bool            `json:"versioning"`
+	RetentionDays     int64           `json:"retention_days"`
+	MaxObjectBytes    *int64          `json:"max_object_bytes,omitempty"`
+	AllowedMimeTypes  []string        `json:"allowed_mime_types"`
+	HomeRegion        string          `json:"home_region"`
+	ReplicationPolicy string          `json:"replication_policy"`
+	CORSOrigins       []string        `json:"cors_origins"`
+	AllowedOrigins    []string        `json:"allowed_origins"`
+	LifecyclePolicy   json.RawMessage `json:"lifecycle_policy"`
+	CustomDomainID    *string         `json:"custom_domain_id,omitempty"`
+	Revision          int64           `json:"revision"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
+}
+
+type AssetWebhook struct {
+	ID            string     `json:"id"`
+	URL           string     `json:"url"`
+	EventTypes    []string   `json:"event_types"`
+	Status        string     `json:"status"`
+	FailureCount  int64      `json:"failure_count"`
+	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
+	LastFailureAt *time.Time `json:"last_failure_at,omitempty"`
+	DisabledAt    *time.Time `json:"disabled_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+type AssetLifecycleRule struct {
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Prefix    string     `json:"prefix"`
+	Action    string     `json:"action"`
+	AgeDays   int64      `json:"age_days"`
+	Enabled   bool       `json:"enabled"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	LastRunAt *time.Time `json:"last_run_at,omitempty"`
+	LastError *string    `json:"last_error,omitempty"`
+}
+
+type AssetCustomDomain struct {
+	ID                string     `json:"id"`
+	Domain            string     `json:"domain"`
+	Status            string     `json:"status"`
+	VerificationName  string     `json:"verification_name"`
+	VerificationValue string     `json:"verification_value"`
+	LastError         *string    `json:"last_error,omitempty"`
+	ProviderDomainID  *string    `json:"provider_domain_id,omitempty"`
+	CertificateID     *string    `json:"certificate_id,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	VerifiedAt        *time.Time `json:"verified_at,omitempty"`
+}
+
+type AssetTransformation struct {
+	ID             string    `json:"id"`
+	Name           string    `json:"name"`
+	Spec           string    `json:"spec"`
+	NormalizedSpec string    `json:"normalized_spec"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type AssetContentPolicy struct {
+	AllowedMimeTypes []string  `json:"allowed_mime_types"`
+	MaxImageBytes    int64     `json:"max_image_bytes"`
+	MaxVideoBytes    int64     `json:"max_video_bytes"`
+	MaxOtherBytes    int64     `json:"max_other_bytes"`
+	RequireScan      bool      `json:"require_scan"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
+type AssetUsageSummary struct {
+	TotalAssets             int64            `json:"total_assets"`
+	TotalBytes              int64            `json:"total_bytes"`
+	PeriodIngressBytes      int64            `json:"period_ingress_bytes"`
+	PeriodEgressBytes       int64            `json:"period_egress_bytes"`
+	PeriodOriginBytes       int64            `json:"period_origin_bytes"`
+	PeriodVerificationBytes int64            `json:"period_verification_bytes"`
+	PeriodTransformCount    int64            `json:"period_transform_count"`
+	PeriodAIRequests        int64            `json:"period_ai_requests"`
+	PeriodLogicalByteHours  int64            `json:"period_logical_storage_byte_hours"`
+	PeriodPhysicalByteHours int64            `json:"period_physical_storage_byte_hours"`
+	PeriodDerivedByteHours  int64            `json:"period_derived_storage_byte_hours"`
+	PeriodTransformMillis   int64            `json:"period_transform_compute_ms"`
+	PeriodVideoInputSeconds int64            `json:"period_video_input_seconds"`
+	PeriodAICostMicros      int64            `json:"period_ai_cost_micros"`
+	ByBucket                map[string]int64 `json:"by_bucket"`
+	ByMimeFamily            map[string]int64 `json:"by_mime_family"`
+	ByVisibility            map[string]int64 `json:"by_visibility"`
+}
+
+type Asset struct {
+	ID                string `json:"id"`
+	Bucket            string `json:"bucket"`
+	Key               string `json:"key"`
+	OriginalName      string `json:"original_name"`
+	MimeType          string `json:"mime_type"`
+	Size              int64  `json:"size"`
+	ChecksumSHA256    string `json:"checksum_sha256"`
+	Visibility        string `json:"visibility"`
+	Status            string `json:"status"`
+	ReplicationStatus string `json:"replication_status"`
+	Generation        int64  `json:"generation"`
+	Revision          int64  `json:"revision"`
+	URL               string `json:"url"`
+}
+
+type AssetJob struct {
+	ID              string          `json:"id"`
+	JobName         string          `json:"job_name"`
+	Status          string          `json:"status"`
+	Result          json.RawMessage `json:"result"`
+	Error           json.RawMessage `json:"error"`
+	Attempts        int64           `json:"attempts"`
+	MaxAttempts     int64           `json:"max_attempts"`
+	ProgressPercent *int64          `json:"progress_percent,omitempty"`
+	Phase           string          `json:"phase,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+}
+
 type Build struct {
 	ID        string    `json:"id"`
 	ProjectID string    `json:"project_id,omitempty"`

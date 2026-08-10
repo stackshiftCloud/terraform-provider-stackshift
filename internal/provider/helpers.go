@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -12,6 +14,16 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/stackshift/terraform-provider-stackshift/internal/provider/client"
 )
+
+func deterministicIdempotencyKey(prefix string, identity ...string) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(prefix))
+	for _, value := range identity {
+		_, _ = hash.Write([]byte{0})
+		_, _ = hash.Write([]byte(strings.TrimSpace(value)))
+	}
+	return prefix + "-" + hex.EncodeToString(hash.Sum(nil))
+}
 
 func configuredClient(data any, diags *diag.Diagnostics) *client.Client {
 	c, ok := data.(*client.Client)

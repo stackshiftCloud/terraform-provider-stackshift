@@ -57,6 +57,10 @@ type envelope struct {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, out any) error {
+	return c.doWithHeaders(ctx, method, path, body, nil, out)
+}
+
+func (c *Client) doWithHeaders(ctx context.Context, method, path string, body any, headers map[string]string, out any) error {
 	var reqBody io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -72,6 +76,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
+	for name, value := range headers {
+		req.Header.Set(name, value)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -115,6 +122,228 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		return json.Unmarshal(env.Data, out)
 	}
 	return json.Unmarshal(raw, out)
+}
+
+func (c *Client) CreateAssetBucket(ctx context.Context, req map[string]any) (*AssetBucket, error) {
+	var bucket AssetBucket
+	err := c.do(ctx, http.MethodPost, "/assets/buckets", req, &bucket)
+	return &bucket, err
+}
+
+func (c *Client) ListAssetBuckets(ctx context.Context) ([]AssetBucket, error) {
+	var result struct {
+		Buckets []AssetBucket `json:"buckets"`
+	}
+	err := c.do(ctx, http.MethodGet, "/assets/buckets", nil, &result)
+	return result.Buckets, err
+}
+
+func (c *Client) GetAssetBucket(ctx context.Context, id string) (*AssetBucket, error) {
+	buckets, err := c.ListAssetBuckets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, bucket := range buckets {
+		if bucket.ID == id {
+			return &bucket, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (c *Client) UpdateAssetBucket(ctx context.Context, id string, revision int64, req map[string]any) (*AssetBucket, error) {
+	var bucket AssetBucket
+	err := c.doWithHeaders(ctx, http.MethodPut, "/assets/buckets/"+url.PathEscape(id), req,
+		map[string]string{"If-Match": fmt.Sprintf("\"%d\"", revision)}, &bucket)
+	return &bucket, err
+}
+
+func (c *Client) DeleteAssetBucket(ctx context.Context, id string, revision int64) error {
+	err := c.doWithHeaders(ctx, http.MethodDelete, "/assets/buckets/"+url.PathEscape(id), nil,
+		map[string]string{"If-Match": fmt.Sprintf("\"%d\"", revision)}, nil)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (c *Client) CreateAssetWebhook(ctx context.Context, endpoint string, eventTypes []string) (*AssetWebhook, string, error) {
+	var result struct {
+		Webhook AssetWebhook `json:"webhook"`
+		Secret  string       `json:"secret"`
+	}
+	err := c.do(ctx, http.MethodPost, "/assets/webhooks", map[string]any{"url": endpoint, "event_types": eventTypes}, &result)
+	return &result.Webhook, result.Secret, err
+}
+
+func (c *Client) ListAssetWebhooks(ctx context.Context) ([]AssetWebhook, error) {
+	var result struct {
+		Webhooks []AssetWebhook `json:"webhooks"`
+	}
+	err := c.do(ctx, http.MethodGet, "/assets/webhooks", nil, &result)
+	return result.Webhooks, err
+}
+
+func (c *Client) GetAssetWebhook(ctx context.Context, id string) (*AssetWebhook, error) {
+	items, err := c.ListAssetWebhooks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.ID == id {
+			return &item, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (c *Client) DeleteAssetWebhook(ctx context.Context, id string) error {
+	err := c.do(ctx, http.MethodDelete, "/assets/webhooks/"+url.PathEscape(id), nil, nil)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (c *Client) CreateAssetLifecycleRule(ctx context.Context, req map[string]any) (*AssetLifecycleRule, error) {
+	var rule AssetLifecycleRule
+	err := c.do(ctx, http.MethodPost, "/assets/lifecycle-rules", req, &rule)
+	return &rule, err
+}
+
+func (c *Client) ListAssetLifecycleRules(ctx context.Context) ([]AssetLifecycleRule, error) {
+	var result struct {
+		Rules []AssetLifecycleRule `json:"lifecycle_rules"`
+	}
+	err := c.do(ctx, http.MethodGet, "/assets/lifecycle-rules", nil, &result)
+	return result.Rules, err
+}
+
+func (c *Client) GetAssetLifecycleRule(ctx context.Context, id string) (*AssetLifecycleRule, error) {
+	items, err := c.ListAssetLifecycleRules(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.ID == id {
+			return &item, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (c *Client) DeleteAssetLifecycleRule(ctx context.Context, id string) error {
+	err := c.do(ctx, http.MethodDelete, "/assets/lifecycle-rules/"+url.PathEscape(id), nil, nil)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (c *Client) CreateAssetDomain(ctx context.Context, domain string) (*AssetCustomDomain, error) {
+	var result AssetCustomDomain
+	err := c.do(ctx, http.MethodPost, "/assets/domains", map[string]string{"domain": domain}, &result)
+	return &result, err
+}
+
+func (c *Client) ListAssetDomains(ctx context.Context) ([]AssetCustomDomain, error) {
+	var result struct {
+		Domains []AssetCustomDomain `json:"domains"`
+	}
+	err := c.do(ctx, http.MethodGet, "/assets/domains", nil, &result)
+	return result.Domains, err
+}
+
+func (c *Client) GetAssetDomain(ctx context.Context, id string) (*AssetCustomDomain, error) {
+	items, err := c.ListAssetDomains(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.ID == id {
+			return &item, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (c *Client) VerifyAssetDomain(ctx context.Context, id string) (*AssetCustomDomain, error) {
+	var result AssetCustomDomain
+	err := c.do(ctx, http.MethodPost, "/assets/domains/"+url.PathEscape(id)+"/verify", nil, &result)
+	return &result, err
+}
+
+func (c *Client) DeleteAssetDomain(ctx context.Context, id string) error {
+	err := c.do(ctx, http.MethodDelete, "/assets/domains/"+url.PathEscape(id), nil, nil)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (c *Client) UpsertAssetTransformation(ctx context.Context, req map[string]any) (*AssetTransformation, error) {
+	var transformation AssetTransformation
+	err := c.do(ctx, http.MethodPost, "/assets/transformations", req, &transformation)
+	return &transformation, err
+}
+
+func (c *Client) ListAssetTransformations(ctx context.Context) ([]AssetTransformation, error) {
+	var result struct {
+		Transformations []AssetTransformation `json:"transformations"`
+	}
+	err := c.do(ctx, http.MethodGet, "/assets/transformations", nil, &result)
+	return result.Transformations, err
+}
+
+func (c *Client) GetAssetTransformation(ctx context.Context, name string) (*AssetTransformation, error) {
+	items, err := c.ListAssetTransformations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.Name == name {
+			return &item, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (c *Client) DeleteAssetTransformation(ctx context.Context, name string) error {
+	err := c.do(ctx, http.MethodDelete, "/assets/transformations/"+url.PathEscape(name), nil, nil)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (c *Client) GetAssetContentPolicy(ctx context.Context) (*AssetContentPolicy, error) {
+	var policy AssetContentPolicy
+	err := c.do(ctx, http.MethodGet, "/assets/policy", nil, &policy)
+	return &policy, err
+}
+
+func (c *Client) UpdateAssetContentPolicy(ctx context.Context, req map[string]any) (*AssetContentPolicy, error) {
+	var policy AssetContentPolicy
+	err := c.do(ctx, http.MethodPut, "/assets/policy", req, &policy)
+	return &policy, err
+}
+
+func (c *Client) GetAssetAnalytics(ctx context.Context) (*AssetUsageSummary, error) {
+	var summary AssetUsageSummary
+	err := c.do(ctx, http.MethodGet, "/assets/analytics", nil, &summary)
+	return &summary, err
+}
+
+func (c *Client) GetAsset(ctx context.Context, id string) (*Asset, error) {
+	var asset Asset
+	err := c.do(ctx, http.MethodGet, "/assets/"+url.PathEscape(id), nil, &asset)
+	return &asset, err
+}
+
+func (c *Client) GetAssetJob(ctx context.Context, id string) (*AssetJob, error) {
+	var job AssetJob
+	err := c.do(ctx, http.MethodGet, "/assets/jobs/"+url.PathEscape(id), nil, &job)
+	return &job, err
 }
 
 func (c *Client) CreateProject(ctx context.Context, req CreateProjectRequest) (*Project, error) {
