@@ -23,6 +23,31 @@ func TestProviderRegistersBucketResource(t *testing.T) {
 	t.Fatal("stackshift_bucket is not registered")
 }
 
+func TestProviderRegistersMailInfrastructureResources(t *testing.T) {
+	t.Parallel()
+
+	want := map[string]bool{
+		"stackshift_mail_domain":  false,
+		"stackshift_mail_webhook": false,
+	}
+	for _, factory := range (&stackshiftProvider{}).Resources(context.Background()) {
+		var response resource.MetadataResponse
+		factory().Metadata(
+			context.Background(),
+			resource.MetadataRequest{ProviderTypeName: "stackshift"},
+			&response,
+		)
+		if _, ok := want[response.TypeName]; ok {
+			want[response.TypeName] = true
+		}
+	}
+	for name, found := range want {
+		if !found {
+			t.Fatalf("%s is not registered", name)
+		}
+	}
+}
+
 var testAccProtoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServer, error){
 	"stackshift": providerserver.NewProtocol6WithError(New()),
 }

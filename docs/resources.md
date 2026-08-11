@@ -243,6 +243,14 @@ Triggers a runbook execution when the resource is created.
 
 Manages an Assets bucket, including visibility, upload policy, CORS, replication, lifecycle JSON, and an optional custom domain association.
 
+## `stackshift_mail_domain`
+
+Manages a StackShift Mail sending domain. Set exactly one of `domain` or `registered_domain_id`. `verify_on_create` performs a DNS verification attempt after creation. Import with the Mail domain UUID.
+
+## `stackshift_mail_webhook`
+
+Manages a signed StackShift Mail event webhook. `event_types` uses current recipient events such as `mail.message.mta_accepted`, `mail.delivery.delivered`, `mail.delivery.delayed`, `mail.message.bounced`, and `mail.message.complained`. The HMAC `secret` is returned once, is marked sensitive, and is not recoverable when importing an existing webhook.
+
 ## `stackshift_asset_webhook`
 
 Manages a signed Assets event subscription. The `secret` attribute is sensitive and is returned only at creation time; retain the Terraform state securely.

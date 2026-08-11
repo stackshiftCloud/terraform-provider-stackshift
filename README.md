@@ -1,6 +1,6 @@
 # Terraform Provider for StackShift
 
-Use this provider to manage StackShift projects, environment variables, databases, S2 object-storage buckets, domains, DNS records, build/deployment actions, compute instances, agency resources, and runbooks from Terraform or OpenTofu.
+Use this provider to manage StackShift projects, environment variables, databases, S2 object-storage buckets, domains, DNS records, Mail sending domains and signed webhooks, build/deployment actions, compute instances, agency resources, and runbooks from Terraform or OpenTofu.
 
 S2 returns a bucket secret access key only when the bucket is created. The provider marks it sensitive, but Terraform still stores it in state. Use encrypted remote state with tightly scoped access.
 
@@ -13,7 +13,7 @@ terraform {
   required_providers {
     stackshift = {
       source  = "stackshiftCloud/stackshift"
-      version = "~> 0.1"
+      version = "~> 1.0"
     }
   }
 }
@@ -58,7 +58,7 @@ provider_installation {
 1. Create a public GitHub repository named `terraform-provider-stackshift`.
 2. Add an RSA or DSA GPG signing key to Terraform Registry under the StackShift namespace.
 3. Add `GPG_PRIVATE_KEY` and `PASSPHRASE` repository secrets in GitHub.
-4. Push a SemVer tag such as `v0.1.0`.
+4. Push a SemVer tag such as `v1.0.0`.
 5. GitHub Actions runs GoReleaser and creates a signed GitHub release.
 6. In Terraform Registry, choose Publish > Provider and select the GitHub repository.
 

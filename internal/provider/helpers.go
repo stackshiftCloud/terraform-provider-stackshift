@@ -72,6 +72,13 @@ func timeString(t time.Time) types.String {
 	return types.StringValue(t.Format(time.RFC3339))
 }
 
+func optionalTimeString(t *time.Time) types.String {
+	if t == nil {
+		return types.StringNull()
+	}
+	return timeString(t.UTC())
+}
+
 func splitCompositeID(id string, parts int) ([]string, error) {
 	values := strings.Split(id, ":")
 	if len(values) != parts {
