@@ -109,6 +109,8 @@ func (p *stackshiftProvider) Resources(_ context.Context) []func() resource.Reso
 		NewAssetContentPolicyResource,
 		NewMailDomainResource,
 		NewMailWebhookResource,
+		NewWorkloadDependencyResource,
+		NewWorkloadEgressGrantResource,
 	}
 }
 

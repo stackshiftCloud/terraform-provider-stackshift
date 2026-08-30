@@ -65,6 +65,13 @@ func int64Ptr(v types.Int64) *int64 {
 	return &i
 }
 
+func int64Value(v *int64) types.Int64 {
+	if v == nil {
+		return types.Int64Null()
+	}
+	return types.Int64Value(*v)
+}
+
 func timeString(t time.Time) types.String {
 	if t.IsZero() {
 		return types.StringNull()

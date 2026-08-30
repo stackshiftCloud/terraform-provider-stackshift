@@ -1,8 +1,12 @@
 # Terraform Provider for StackShift
 
-Use this provider to manage StackShift projects, environment variables, databases, S2 object-storage buckets, domains, DNS records, Mail sending domains and signed webhooks, build/deployment actions, compute instances, agency resources, and runbooks from Terraform or OpenTofu.
+Use this provider to manage StackShift projects, environment variables, databases, S2 object-storage buckets, domains, DNS records, Mail sending domains and signed webhooks, hosted-workload dependencies and egress requests, build/deployment actions, compute instances, agency resources, and runbooks from Terraform or OpenTofu.
 
 S2 returns a bucket secret access key only when the bucket is created. The provider marks it sensitive, but Terraform still stores it in state. Use encrypted remote state with tightly scoped access.
+
+S2 bucket settings can select `none`, StackShift-managed `sse-s2`, or platform-managed `sse-kms` encryption. The KMS key is selected by StackShift and exposed only as computed state; customers do not configure AWS credentials in this provider.
+
+Hosted workload security uses two separate resources: `stackshift_workload_external_dependency` declares the exact destination an application needs, while `stackshift_workload_egress_grant` requests scoped access to it. Terraform cannot approve its own request; an authorized StackShift operator must make the security decision. Destroying a dependency disables it and revokes its active grants. Destroying a grant revokes that request while retaining its audit record.
 
 ## Install
 

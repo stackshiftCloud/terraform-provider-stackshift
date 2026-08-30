@@ -26,6 +26,25 @@ func (c *Client) GetBucket(ctx context.Context, id string) (*Bucket, error) {
 	return &data.Bucket, err
 }
 
+// UpdateBucketSettings applies the mutable S2 bucket policy.
+func (c *Client) UpdateBucketSettings(
+	ctx context.Context,
+	id string,
+	req UpdateBucketSettingsRequest,
+) (*Bucket, error) {
+	var data struct {
+		Bucket Bucket `json:"bucket"`
+	}
+	err := c.do(
+		ctx,
+		http.MethodPatch,
+		"/buckets/"+url.PathEscape(id)+"/settings",
+		req,
+		&data,
+	)
+	return &data.Bucket, err
+}
+
 // DeleteBucket removes an S2 bucket. force permits deletion of contained objects.
 func (c *Client) DeleteBucket(ctx context.Context, id string, force bool) error {
 	path := "/buckets/" + url.PathEscape(id) + "/"

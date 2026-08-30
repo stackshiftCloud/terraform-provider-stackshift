@@ -1,5 +1,46 @@
 # Resources
 
+## `stackshift_workload_external_dependency`
+
+Declares one exact external service used by a hosted project. Declaration records the hostname, port, protocol, purpose, and TLS requirement, but does not approve network access.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `project_id` | yes | Owning project; replaces the resource if changed. |
+| `environment` | no | Defaults to `production`; replaces the resource if changed. |
+| `hostname` | yes | Exact service hostname. Do not put credentials or a complete connection URL here. |
+| `port` | yes | Exact destination port. |
+| `protocol` | no | Defaults to `tls`. |
+| `purpose` | yes | Human-readable reason the workload needs the destination. |
+| `tls_required` | no | Defaults to `true`. |
+
+`private_route_required`, `detected`, and `status` are computed. Destroying this resource disables the declaration and revokes its active grants while retaining the security audit record.
+
+## `stackshift_workload_egress_grant`
+
+Requests scoped, expiring outbound access for a hosted workload. StackShift operator approval remains a separate action and cannot be performed by Terraform.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `project_id` | yes | Owning project; replaces the resource if changed. |
+| `dependency_id` | no | ID of the related `stackshift_workload_external_dependency`. |
+| `environment` | no | Defaults to `production`. |
+| `protocol` | no | Defaults to `tls`. |
+| `hostname` | no | Exact approved hostname. Use either an exact hostname or CIDR. |
+| `cidr` | no | Exact approved CIDR where hostname policy is not appropriate. |
+| `port_start` | yes | First allowed destination port. |
+| `port_end` | yes | Last allowed destination port. |
+| `purpose` | yes | Human-readable operational purpose. |
+| `broad_public_egress` | no | Defaults to `false`; broad requests require explicit operator approval and expire within seven days. |
+| `expires_at` | yes | RFC3339 expiry. Destination-scoped grants may last up to 90 days. |
+| `idempotency_key` | no | Stable create key; deterministically derived from the immutable request when omitted. |
+
+`status` is computed and remains pending until an operator records a decision. Destroying this resource revokes the request while retaining its security audit record.
+
 ## `stackshift_project`
 
 Manages a StackShift project through `/api/v1/projects`.
@@ -312,8 +353,17 @@ The API creates one bucket-scoped access key with the bucket. Its secret is retu
 | `project_id` | no | Optional owning StackShift project; changes replace the bucket. |
 | `access_key_label` | no | Label for the initial bucket-scoped access key. |
 | `force_destroy` | no | Defaults to `false`; when true, destroy also removes contained objects. |
+| `versioning_enabled` | no | Enables object versioning without replacing the bucket. |
+| `quota_bytes` | no | Optional bucket quota; it cannot be lower than current usage. |
+| `default_retention_days` | no | Default retention window: `0`, `7`, `30`, or `90` days. |
+| `tier_after_days` | no | Tiering threshold: `0`, `7`, `30`, or `90` days. |
+| `website_enabled` | no | Enables static website behavior for the bucket. |
+| `website_index` | no | Website index object key; defaults to `index.html`. |
+| `website_error` | no | Optional website error object key. |
+| `encryption_mode` | no | `none`, `sse-s2`, or platform-managed `sse-kms`. |
+| `custom_domain_id` | no | Optional active StackShift custom-domain ID. |
 
-Computed attributes include `endpoint`, `access_key_id`, `secret_access_key`, `object_count`, `size_bytes`, `created_at`, and `updated_at`.
+Computed attributes include `endpoint`, `access_key_id`, `secret_access_key`, `kms_key_id`, `object_count`, `size_bytes`, `created_at`, and `updated_at`. Customers select `sse-kms`; StackShift selects and returns the platform key. The resource does not accept customer AWS credentials or an arbitrary KMS key ARN.
 
 ### Import
 
