@@ -10,14 +10,14 @@ Hosted workload security uses two separate resources: `stackshift_workload_exter
 
 ## Install
 
-After the provider is published to the Terraform Registry:
+Install the provider from the Terraform Registry:
 
 ```hcl
 terraform {
   required_providers {
     stackshift = {
       source  = "stackshiftCloud/stackshift"
-      version = "~> 1.0"
+      version = "~> 0.2"
     }
   }
 }
