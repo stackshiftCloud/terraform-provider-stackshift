@@ -85,6 +85,8 @@ func (p *stackshiftProvider) Resources(_ context.Context) []func() resource.Reso
 		NewProjectResource,
 		NewProjectEnvResource,
 		NewDatabaseResource,
+		NewDedicatedDatabaseResource,
+		NewDedicatedDatabaseReplicaResource,
 		NewBucketResource,
 		NewDomainResource,
 		NewDNSRecordResource,
@@ -119,8 +121,11 @@ func (p *stackshiftProvider) DataSources(_ context.Context) []func() datasource.
 		NewProjectDataSource,
 		NewDatabaseDataSource,
 		NewDatabaseCredentialsDataSource,
+		NewDatabaseInstanceClassesDataSource,
 		NewAssetDataSource,
 		NewAssetJobDataSource,
 		NewAssetAnalyticsDataSource,
+		NewRegionsDataSource,
+		NewAppSizesDataSource,
 	}
 }

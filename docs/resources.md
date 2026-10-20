@@ -370,3 +370,69 @@ Computed attributes include `endpoint`, `access_key_id`, `secret_access_key`, `k
 ```sh
 terraform import stackshift_bucket.uploads <bucket_id>
 ```
+
+## `stackshift_dedicated_database`
+
+Manages a Dedicated PostgreSQL database through `/api/v1/databases` (or `/api/v1/projects/{project_id}/databases` when `project_id` is set). Dedicated databases must be switched on for your account; otherwise the API answers 403. Dedicated is a paid product: see https://stackshift.cloud/pricing.
+
+The master password is returned only once, when the database is created. It is stored in sensitive Terraform state as `master_password`, so keep state in an encrypted remote backend with restricted access. Import can't recover it.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `name` | yes | 3 to 40 lowercase letters, digits and dashes. Changes replace the database. |
+| `instance_class` | yes | A slug from `stackshift_database_instance_classes`. Changes in place. |
+| `storage_gb` | yes | 10 to 1024. Grows in place; it can't shrink. When autogrow raises the size above this value, Terraform doesn't treat it as drift; read the real size from `allocated_storage_gb`. A value below the current size is recorded without a change, since storage can't shrink. |
+| `storage_max_gb` | no | Autogrow limit. The server default is twice `storage_gb`, up to 1024. Changes in place. |
+| `project_id` | no | Owning project. Changes replace the database. |
+| `version` | no | PostgreSQL `15` to `18`; defaults to `17`. Changes replace the database. |
+| `master_username` | no | Defaults to `app_owner`. Changes replace the database. |
+| `database_name` | no | Defaults to `app`. Changes replace the database. |
+| `backup_retention_days` | no | 7 to 35; defaults to 7. Changes in place. |
+| `deletion_protection` | no | Defaults to `false`. While true, the API refuses to delete the database. Changes in place, so set it to `false` and apply before destroying. |
+| `maintenance_window` | no | `{ day_of_week = 0-6, start_minute = 0-1439 }`. Picked at random when left out, then read back. Changes in place; a size change waiting for the window moves with it. |
+| `billing` | no | `monthly` (default), `yearly` or `hourly`. Changes replace the database. |
+| `standby` | no | `off` (default), `sync` or `async`. Changes in place. |
+| `on_standby_loss` | no | `degrade` (default) or `block`. Changes in place. |
+| `apply_changes` | no | When a size change runs: `window` (default, in the maintenance window) or `now`. |
+| `accept_price_changes` | no | Defaults to `false`. See paid changes below. |
+| `skip_final_snapshot` | no | Defaults to `false`, so destroy takes a final snapshot first. Set `true` to delete without one. |
+
+Computed attributes: `id`, `master_password`, `allocated_storage_gb` (the current storage size, including autogrow), `status`, `host`, `port`, `endpoints` (`protocol`, `network`, `role`, `host`, `port`, `tls_mode`, `primary`), `billing_status` and `checkout_url`.
+
+### Paying for a new database
+
+When the wallet covers the first payment (or the first hour on hourly billing), the database starts right away. When a card payment is needed, the apply finishes with a warning that contains the checkout link, and the database stays in state with `status = "pending_payment"` and the link in `checkout_url`. It doesn't fail the apply on purpose: a failed create would mark the resource tainted and the next apply would delete it and start over. The account owner pays at the link, then the next `terraform apply` refreshes the database to its running status. Unpaid databases are removed after 24 hours, and the next apply then creates a new one.
+
+### Paid changes
+
+Size changes, standby changes and storage growth are prorated. Deletion protection, backup retention and the maintenance window are free to change. When a change costs extra, the API returns a quote. With `accept_price_changes = false` the apply stops with the charge, the new monthly price and the currency; set `accept_price_changes = true` and apply again to go ahead. With `true`, the provider confirms the quoted charge and adds a warning with the amount. If the wallet doesn't cover the charge, the apply stops and asks you to top up the wallet. Downgrades and removals credit the wallet automatically.
+
+### Import
+
+```sh
+terraform import stackshift_dedicated_database.orders <database_id>
+```
+
+Import reads every setting back from the API except `master_password` and `master_username`.
+
+## `stackshift_dedicated_database_replica`
+
+Adds a read replica to a Dedicated database through `POST /databases/{id}/replicas`, up to 5 per database. Each replica needs at least half the database's memory. Replicas that have caught up answer on the database's read hostname. Changing `database_id` or `instance_class` replaces the replica. Adding a replica is a paid change and follows the same `accept_price_changes` rules as `stackshift_dedicated_database`.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `database_id` | yes | The Dedicated database. |
+| `instance_class` | no | Defaults to the database's size. |
+| `accept_price_changes` | no | Defaults to `false`. |
+
+Computed attributes: `id`, `status` and `site`.
+
+### Import
+
+```sh
+terraform import stackshift_dedicated_database_replica.read <database_id>:<replica_id>
+```
