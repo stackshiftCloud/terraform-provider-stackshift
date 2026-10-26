@@ -39,6 +39,7 @@ type DedicatedParameters struct {
 	Group          *DedicatedParameterGroupRef `json:"group"`
 	Applied        bool                        `json:"applied"`
 	PendingRestart []string                    `json:"pending_restart"`
+	Error          string                      `json:"error"`
 }
 
 type DedicatedBackupSet struct {
@@ -247,8 +248,8 @@ func (c *Client) GetDedicatedPublicAccess(ctx context.Context, id, policyID stri
 	return &result.Policy, err
 }
 
-func (c *Client) RevokeDedicatedPublicAccess(ctx context.Context, id string) error {
-	err := c.dedicatedDo(ctx, http.MethodPost, dedicatedPath(id, "/public-access/revoke"), nil, nil)
+func (c *Client) RevokeDedicatedPublicAccess(ctx context.Context, id, policyID string) error {
+	err := c.dedicatedDo(ctx, http.MethodPost, dedicatedPath(id, "/public-access/revoke"), map[string]any{"policy_id": policyID}, nil)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}

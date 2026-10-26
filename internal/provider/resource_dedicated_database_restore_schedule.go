@@ -105,7 +105,7 @@ func (r *dedicatedDatabaseRestoreScheduleResource) Create(ctx context.Context, r
 		return
 	}
 	plan.ID = plan.DatabaseID
-	if err := waitDedicatedRunning(ctx, r.client, plan.DatabaseID.ValueString()); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, plan.DatabaseID.ValueString(), dedicatedWaitLimit); err != nil {
 		resp.Diagnostics.AddError("The database isn't ready for restore point schedules", dedicatedErrorDetail(err))
 		return
 	}

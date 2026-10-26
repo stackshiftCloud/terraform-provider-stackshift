@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -19,8 +18,6 @@ import (
 var _ resource.ResourceWithConfigure = (*databaseParameterGroupResource)(nil)
 var _ resource.ResourceWithImportState = (*databaseParameterGroupResource)(nil)
 var _ resource.ResourceWithValidateConfig = (*databaseParameterGroupResource)(nil)
-
-var parameterGroupFamilies = []string{"postgres15", "postgres16", "postgres17", "postgres18", "mysql8.4"}
 
 func NewDatabaseParameterGroupResource() resource.Resource { return &databaseParameterGroupResource{} }
 
@@ -53,7 +50,7 @@ func (r *databaseParameterGroupResource) Schema(_ context.Context, _ resource.Sc
 			"id":   schema.StringAttribute{Computed: true, PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 			"name": schema.StringAttribute{Required: true, Description: "1 to 60 characters, unique in your account. Changes in place."},
 			"family": schema.StringAttribute{Required: true, PlanModifiers: replaceString(),
-				Description: "The engine and version the group is for: postgres15, postgres16, postgres17, postgres18 or mysql8.4. Changing this replaces the group."},
+				Description: "The engine and version the group is for, such as postgres17 or mysql8.4. See stackshift_database_parameter_definitions. Changing this replaces the group."},
 			"description": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString(""), Description: "Changes in place."},
 			"parameters": schema.MapAttribute{Optional: true, Computed: true, ElementType: types.StringType,
 				Default:     mapdefault.StaticValue(types.MapValueMust(types.StringType, map[string]attr.Value{})),
@@ -65,11 +62,7 @@ func (r *databaseParameterGroupResource) Schema(_ context.Context, _ resource.Sc
 }
 
 func (r *databaseParameterGroupResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
-	var family types.String
-	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("family"), &family)...)
-	if !family.IsNull() && !family.IsUnknown() && !containsString(parameterGroupFamilies, family.ValueString()) {
-		resp.Diagnostics.AddAttributeError(path.Root("family"), "Unsupported value", fmt.Sprintf("Use one of %v.", parameterGroupFamilies))
-	}
+	validateUnpaddedName(ctx, req.Config, "name", &resp.Diagnostics)
 }
 
 func (r *databaseParameterGroupResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {

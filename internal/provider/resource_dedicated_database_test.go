@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -66,6 +67,9 @@ type fakeDedicatedAPI struct {
 	billingPuts     []map[string]any
 	restoreBody     map[string]any
 	management      managementState
+	deleting        bool
+	deleteReads     int
+	createCount     int
 }
 
 func (f *fakeDedicatedAPI) database() map[string]any {
@@ -120,6 +124,14 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var body map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	route := r.Method + " " + strings.TrimPrefix(r.URL.Path, "/api/v1")
+	if strings.HasPrefix(route, "GET /databases/db-1") && f.deleting {
+		if f.deleteReads < 2 {
+			f.deleteReads++
+			f.status = "deleting"
+		} else {
+			f.deleted = true
+		}
+	}
 	if strings.HasPrefix(route, "GET /databases/db-1") && (!f.created || f.deleted) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "message": "database not found"})
 		return
@@ -134,6 +146,7 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}})
 	case "POST /databases":
 		f.created, f.createBody, f.class = true, body, body["instance_class"].(string)
+		f.createCount++
 		f.engine, f.version = body["type"].(string), "17"
 		if f.engine == "mysql" {
 			f.version = "8.4"
@@ -216,7 +229,7 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.replicas = nil
 		writeOK(w, http.StatusAccepted, map[string]any{"message": "removing"})
 	case "DELETE /databases/db-1":
-		f.deleted, f.deleteQuery = true, r.URL.RawQuery
+		f.deleting, f.deleteQuery = true, r.URL.RawQuery
 		writeOK(w, http.StatusAccepted, map[string]any{"status": "deleting"})
 	default:
 		if !f.management.serve(f, w, route, r.URL.Query().Get("family"), body) {
@@ -271,14 +284,15 @@ func TestDedicatedDatabaseInstanceClassesDataSource(t *testing.T) {
 }
 
 func TestDedicatedDatabaseCreatePaidClassChangeAndDelete(t *testing.T) {
+	fastPolling(t)
 	fake := &fakeDedicatedAPI{}
 	startFakeDedicatedAPI(t, fake)
 	name := "stackshift_dedicated_database.orders"
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: dedicatedFactories,
 		CheckDestroy: func(*terraform.State) error {
-			if fake.deleteQuery != "skip_final_snapshot=true" {
-				return fmt.Errorf("delete query = %q", fake.deleteQuery)
+			if fake.deleteQuery != "skip_final_snapshot=true" || !fake.deleted || fake.deleteReads != 2 {
+				return fmt.Errorf("delete query = %q, deleted = %v after %d reads", fake.deleteQuery, fake.deleted, fake.deleteReads)
 			}
 			return nil
 		},
@@ -368,6 +382,7 @@ func TestDedicatedDatabaseCreatePaidClassChangeAndDelete(t *testing.T) {
 }
 
 func TestDedicatedDatabaseCreatePaymentRequiredKeepsPendingDatabase(t *testing.T) {
+	fastPolling(t)
 	fake := &fakeDedicatedAPI{paymentRequired: true}
 	startFakeDedicatedAPI(t, fake)
 	name := "stackshift_dedicated_database.orders"
@@ -411,7 +426,7 @@ func TestDedicatedDatabaseCreatePaymentRequiredWarningHasCheckoutURL(t *testing.
 	model := dedicatedDatabaseModel{
 		ID: types.StringUnknown(), ProjectID: types.StringUnknown(), Name: types.StringValue("orders"), Engine: types.StringUnknown(), Version: types.StringUnknown(),
 		InstanceClass: types.StringValue("s-2vcpu-4gb"), StorageGB: types.Int64Value(20), MasterUsername: types.StringUnknown(), DatabaseName: types.StringUnknown(),
-		RestoreFrom: types.ObjectNull(map[string]attr.Type{"source_database_id": types.StringType, "target_time": types.StringType, "backup_id": types.StringType, "from_mirror": types.BoolType}), BackupRetentionDays: types.Int64Unknown(), StorageMaxGB: types.Int64Unknown(), AllocatedStorageGB: types.Int64Unknown(), MaintenanceWindow: types.ObjectUnknown(maintenanceWindowType.AttrTypes), DeletionProtection: types.BoolValue(false), Billing: types.StringValue("monthly"),
+		RestoreFrom: types.ObjectNull(restoreFromAttributeTypes), Timeouts: timeouts.Value{Object: types.ObjectNull(map[string]attr.Type{"create": types.StringType, "update": types.StringType, "delete": types.StringType})}, BackupRetentionDays: types.Int64Unknown(), StorageMaxGB: types.Int64Unknown(), AllocatedStorageGB: types.Int64Unknown(), MaintenanceWindow: types.ObjectUnknown(maintenanceWindowType.AttrTypes), DeletionProtection: types.BoolValue(false), Billing: types.StringValue("monthly"),
 		Standby: types.StringValue("off"), OnStandbyLoss: types.StringValue("degrade"), ApplyChanges: types.StringValue("window"),
 		AcceptPriceChanges: types.BoolValue(false), SkipFinalSnapshot: types.BoolValue(false), MasterPassword: types.StringUnknown(),
 		Status: types.StringUnknown(), Host: types.StringUnknown(), Port: types.Int64Unknown(), Endpoints: types.ListUnknown(dedicatedEndpointType),

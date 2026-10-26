@@ -133,6 +133,7 @@ func (r *dedicatedDatabaseReplicaResource) ImportState(ctx context.Context, req 
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("database_id"), parts[0])...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), parts[1])...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("accept_price_changes"), false)...)
 }
 
 func (m *dedicatedDatabaseReplicaModel) applyMember(ha *client.DedicatedHA) bool {

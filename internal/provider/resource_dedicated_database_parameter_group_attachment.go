@@ -2,7 +2,10 @@ package provider
 
 import (
 	"context"
+	"fmt"
+	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -24,12 +27,13 @@ func NewDedicatedParameterGroupAttachmentResource() resource.Resource {
 type dedicatedParameterGroupAttachmentResource struct{ client *client.Client }
 
 type dedicatedParameterGroupAttachmentModel struct {
-	ID               types.String `tfsdk:"id"`
-	DatabaseID       types.String `tfsdk:"database_id"`
-	ParameterGroupID types.String `tfsdk:"parameter_group_id"`
-	RestartToApply   types.Bool   `tfsdk:"restart_to_apply"`
-	Applied          types.Bool   `tfsdk:"applied"`
-	PendingRestart   types.List   `tfsdk:"pending_restart"`
+	ID               types.String   `tfsdk:"id"`
+	DatabaseID       types.String   `tfsdk:"database_id"`
+	ParameterGroupID types.String   `tfsdk:"parameter_group_id"`
+	RestartToApply   types.Bool     `tfsdk:"restart_to_apply"`
+	Applied          types.Bool     `tfsdk:"applied"`
+	PendingRestart   types.List     `tfsdk:"pending_restart"`
+	Timeouts         timeouts.Value `tfsdk:"timeouts"`
 }
 
 func (r *dedicatedParameterGroupAttachmentResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -42,7 +46,7 @@ func (r *dedicatedParameterGroupAttachmentResource) Configure(_ context.Context,
 	}
 }
 
-func (r *dedicatedParameterGroupAttachmentResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *dedicatedParameterGroupAttachmentResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Attaches a parameter group to a Dedicated database. The database must be running, and the group must be for its engine and version. Destroying this resource detaches the group and returns the database to its default settings.",
 		Attributes: map[string]schema.Attribute{
@@ -54,6 +58,7 @@ func (r *dedicatedParameterGroupAttachmentResource) Schema(_ context.Context, _ 
 			"applied": schema.BoolAttribute{Computed: true, Description: "Whether the database is running with the group's settings."},
 			"pending_restart": schema.ListAttribute{Computed: true, ElementType: types.StringType,
 				Description: "Settings that are waiting for a restart."},
+			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{Create: true, Update: true}),
 		},
 	}
 }
@@ -65,7 +70,9 @@ func (r *dedicatedParameterGroupAttachmentResource) Create(ctx context.Context, 
 		return
 	}
 	plan.ID = plan.DatabaseID
-	if !r.attach(ctx, &plan, &resp.Diagnostics) {
+	timeout, diags := plan.Timeouts.Create(ctx, dedicatedWaitLimit)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() || !r.attach(ctx, &plan, timeout, &resp.Diagnostics) {
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -110,7 +117,9 @@ func (r *dedicatedParameterGroupAttachmentResource) Update(ctx context.Context, 
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 		return
 	}
-	if !r.attach(ctx, &plan, &resp.Diagnostics) {
+	timeout, diags := plan.Timeouts.Update(ctx, dedicatedWaitLimit)
+	resp.Diagnostics.Append(diags...)
+	if resp.Diagnostics.HasError() || !r.attach(ctx, &plan, timeout, &resp.Diagnostics) {
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -130,12 +139,13 @@ func (r *dedicatedParameterGroupAttachmentResource) Delete(ctx context.Context, 
 func (r *dedicatedParameterGroupAttachmentResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), req.ID)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("database_id"), req.ID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("restart_to_apply"), false)...)
 }
 
-func (r *dedicatedParameterGroupAttachmentResource) attach(ctx context.Context, plan *dedicatedParameterGroupAttachmentModel, diags *diag.Diagnostics) bool {
+func (r *dedicatedParameterGroupAttachmentResource) attach(ctx context.Context, plan *dedicatedParameterGroupAttachmentModel, timeout time.Duration, diags *diag.Diagnostics) bool {
 	databaseID := plan.DatabaseID.ValueString()
 	groupID := plan.ParameterGroupID.ValueString()
-	if err := waitDedicatedRunning(ctx, r.client, databaseID); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, databaseID, timeout); err != nil {
 		diags.AddError("The database isn't ready for a parameter group", dedicatedErrorDetail(err))
 		return false
 	}
@@ -146,6 +156,20 @@ func (r *dedicatedParameterGroupAttachmentResource) attach(ctx context.Context, 
 	if plan.RestartToApply.ValueBool() {
 		if err := r.client.ApplyDedicatedParameters(ctx, databaseID); err != nil {
 			diags.AddError("Restart for StackShift parameters failed", dedicatedErrorDetail(err))
+			return false
+		}
+		err := pollDedicated(ctx, timeout, func(ctx context.Context) (bool, error) {
+			parameters, err := r.client.GetDedicatedParameters(ctx, databaseID)
+			if err != nil {
+				return false, err
+			}
+			if parameters.Error != "" {
+				return false, fmt.Errorf("%s", parameters.Error)
+			}
+			return parameters.Applied && len(parameters.PendingRestart) == 0, nil
+		})
+		if err != nil {
+			diags.AddError("StackShift parameters weren't applied", dedicatedErrorDetail(err))
 			return false
 		}
 	}

@@ -125,7 +125,7 @@ Computed fields: `project_id`, `name`, `engine` (`postgres` or `mysql`), `versio
 
 ## `stackshift_dedicated_database_backups`
 
-Lists the backups of a Dedicated database and the time window it can be restored to, from `GET /databases/{id}/backups`. Use it to pick a `target_time` or a `backup_id` for `restore_from`.
+Lists the backups of a Dedicated database and the time window it can be restored to, from `GET /databases/{id}/backups`. Use it to pick a `target_time` or a `backup_id` for `restore_from`. The target you choose has to lie inside the restorable window, and it should be written out explicitly, as a literal time or a snapshot id, rather than pointing at `restorable_until`, which moves with every backup.
 
 ```hcl
 data "stackshift_dedicated_database_backups" "orders" {
@@ -139,7 +139,7 @@ resource "stackshift_dedicated_database" "restored" {
 
   restore_from = {
     source_database_id = stackshift_dedicated_database.orders.id
-    target_time        = data.stackshift_dedicated_database_backups.orders.restorable_until
+    target_time        = "2026-10-25T14:30:00Z"
   }
 }
 ```
@@ -160,4 +160,4 @@ output "settings_that_need_a_restart" {
 }
 ```
 
-Argument: `family`, one of `postgres15`, `postgres16`, `postgres17`, `postgres18` or `mysql8.4`. Computed field: `parameters`, a list with `name`, `kind`, `min`, `max`, `values` (for settings that take a fixed set), `needs_restart`, `engine_default` and `description`.
+Argument: `family`, the engine and version, such as `postgres17` or `mysql8.4`. StackShift rejects families it doesn't offer. Computed field: `parameters`, a list with `name`, `kind`, `min`, `max`, `values` (for settings that take a fixed set), `needs_restart`, `engine_default` and `description`.

@@ -1,8 +1,12 @@
 package provider
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -11,6 +15,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
+	"github.com/stackshift/terraform-provider-stackshift/internal/provider/client"
 )
 
 type managementState struct {
@@ -28,6 +33,8 @@ type managementState struct {
 	policyRevoked  bool
 	policyBody     map[string]any
 	insightsDays   float64
+	restartReads   int
+	revokedPolicy  string
 }
 
 func fastPolling(t *testing.T) {
@@ -58,8 +65,8 @@ func (m *managementState) parametersView() map[string]any {
 	view := map[string]any{"family": "postgres17", "applied": true, "pending_restart": []string{}}
 	if m.groupAttached != "" {
 		view["group"] = map[string]any{"id": m.groupAttached, "name": "tuned", "version": 1}
-		if m.restarts == 0 {
-			view["pending_restart"] = []string{"shared_buffers"}
+		if m.restarts == 0 || m.restartReads < 2 {
+			view["pending_restart"], view["applied"] = []string{"shared_buffers"}, false
 		}
 	}
 	return view
@@ -101,6 +108,9 @@ func (m *managementState) serve(f *fakeDedicatedAPI, w http.ResponseWriter, rout
 		}
 		writeOK(w, http.StatusOK, m.parametersView())
 	case "GET /databases/db-1/parameters":
+		if m.restarts > 0 {
+			m.restartReads++
+		}
 		writeOK(w, http.StatusOK, m.parametersView())
 	case "POST /databases/db-1/parameters/apply":
 		m.restarts++
@@ -176,8 +186,15 @@ func (m *managementState) serve(f *fakeDedicatedAPI, w http.ResponseWriter, rout
 		m.policyReads++
 		writeOK(w, http.StatusOK, map[string]any{"policy": m.policy})
 	case "POST /databases/db-1/public-access/revoke":
+		m.revokedPolicy, _ = body["policy_id"].(string)
+		if m.policy == nil || m.revokedPolicy != "pol-1" || m.policyRevoked {
+			notFoundJSON("database public access resource not found")
+			return true
+		}
 		m.policyRevoked = true
 		writeOK(w, http.StatusAccepted, map[string]any{"policy": m.policy})
+	case "GET /databases/src-2/backups":
+		writeOK(w, http.StatusOK, map[string]any{"retention_days": 7, "restorable": map[string]any{}, "backups": []map[string]any{}})
 	case "GET /databases/db-1/insights":
 		days := m.insightsDays
 		if days == 0 {
@@ -205,6 +222,7 @@ func (m *managementState) serve(f *fakeDedicatedAPI, w http.ResponseWriter, rout
 }
 
 func TestDedicatedDatabaseMySQLRenameAndBilling(t *testing.T) {
+	fastPolling(t)
 	fake := &fakeDedicatedAPI{}
 	startFakeDedicatedAPI(t, fake)
 	name := "stackshift_dedicated_database.orders"
@@ -226,14 +244,6 @@ resource "stackshift_dedicated_database" "orders" {
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: dedicatedFactories,
 		Steps: []resource.TestStep{
-			{
-				Config:      config("orders", "mysql", `  version = "17"`),
-				ExpectError: regexp.MustCompile(`(?s)mysql\s+supports\s+versions.*8\.4`),
-			},
-			{
-				Config:      config("orders", "oracle", ""),
-				ExpectError: regexp.MustCompile(`Use\s+postgres\s+or\s+mysql`),
-			},
 			{
 				Config: config("orders", "mysql", ""),
 				Check: resource.ComposeAggregateTestCheckFunc(
@@ -272,12 +282,14 @@ resource "stackshift_dedicated_database" "orders" {
 				Config:           config("orders-v2", "mysql", `  billing = "yearly"`),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}},
 			},
+			{ResourceName: name, ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"master_password"}},
 		},
 	})
 }
 
 func TestDedicatedDatabaseRestoreFromSource(t *testing.T) {
-	fake := &fakeDedicatedAPI{}
+	fastPolling(t)
+	fake := runningDedicatedAPI()
 	startFakeDedicatedAPI(t, fake)
 	name := "stackshift_dedicated_database.restored"
 	config := func(restore, extra string) string {
@@ -298,6 +310,30 @@ resource "stackshift_dedicated_database" "restored" {
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: dedicatedFactories,
 		Steps: []resource.TestStep{
+			{
+				Config: `
+data "stackshift_dedicated_database_backups" "empty" {
+  database_id = "src-2"
+  depends_on  = [stackshift_dedicated_database_snapshot.gate]
+}
+
+resource "stackshift_dedicated_database_snapshot" "gate" {
+  database_id = "db-1"
+}
+
+resource "stackshift_dedicated_database" "restored" {
+  name           = "orders-restored"
+  instance_class = "s-2vcpu-4gb"
+  storage_gb     = 20
+
+  restore_from = {
+    source_database_id = "src-2"
+    target_time        = data.stackshift_dedicated_database_backups.empty.restorable_until
+  }
+}
+`,
+				ExpectError: regexp.MustCompile(`Set\s+exactly\s+one\s+of\s+target_time`),
+			},
 			{
 				Config:      config(restoreBlock("    backup_id   = \"bk-1\"\n    target_time = \""+restoreTime+"\"\n"), ""),
 				ExpectError: regexp.MustCompile(`Set\s+exactly\s+one\s+of\s+target_time`),
@@ -331,7 +367,11 @@ resource "stackshift_dedicated_database" "restored" {
 				),
 			},
 			{
-				Config:           config("", "  lifecycle {\n    ignore_changes = [restore_from]\n  }"),
+				Config:           config("", ""),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}},
+			},
+			{
+				Config:           config(restoreBlock("    target_time = \"2026-10-24T09:00:00Z\"\n"), ""),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}},
 			},
 		},
@@ -374,7 +414,6 @@ data "stackshift_database_parameter_definitions" "postgres" {
 			return nil
 		},
 		Steps: []resource.TestStep{
-			{Config: config("postgres19", "65536"), ExpectError: regexp.MustCompile(`Use\s+one\s+of`)},
 			{
 				Config: config("postgres17", "65536"),
 				Check: resource.ComposeAggregateTestCheckFunc(
@@ -391,8 +430,8 @@ data "stackshift_database_parameter_definitions" "postgres" {
 					resource.TestCheckResourceAttr("data.stackshift_database_parameter_definitions.postgres", "parameters.1.needs_restart", "true"),
 					resource.TestCheckResourceAttr("data.stackshift_database_parameter_definitions.postgres", "parameters.1.engine_default", "128MB"),
 					func(*terraform.State) error {
-						if fake.management.groupAttached != "grp-1" || fake.management.restarts != 1 {
-							return fmt.Errorf("attached = %q, restarts = %d", fake.management.groupAttached, fake.management.restarts)
+						if fake.management.groupAttached != "grp-1" || fake.management.restarts != 1 || fake.management.restartReads < 2 {
+							return fmt.Errorf("attached = %q, restarts = %d, reads = %d", fake.management.groupAttached, fake.management.restarts, fake.management.restartReads)
 						}
 						return nil
 					},
@@ -527,8 +566,8 @@ resource "stackshift_dedicated_database_public_access" "office" {
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: dedicatedFactories,
 		CheckDestroy: func(*terraform.State) error {
-			if !fake.management.policyRevoked {
-				return fmt.Errorf("public access was not revoked")
+			if !fake.management.policyRevoked || fake.management.revokedPolicy != "pol-1" {
+				return fmt.Errorf("public access was not revoked: %q", fake.management.revokedPolicy)
 			}
 			return nil
 		},
@@ -536,6 +575,7 @@ resource "stackshift_dedicated_database_public_access" "office" {
 			{Config: config(`  access_mode = "restricted"`), ExpectError: regexp.MustCompile(`Set\s+allowed_cidrs\s+and\s+expires_at`)},
 			{Config: config(`  access_mode = "anywhere"`), ExpectError: regexp.MustCompile(`acknowledge_public_exposure\s+=\s+true`)},
 			{Config: config(strings.Replace(restricted, "2026-12-01T00:00:00Z", "2026-12-01", 1)), ExpectError: regexp.MustCompile(`Use\s+a\s+UTC\s+time`)},
+			{Config: config(strings.Replace(restricted, "203.0.113.0/24", "203.0.113.5/24", 1)), ExpectError: regexp.MustCompile(`Use\s+canonical\s+address\s+ranges`)},
 			{
 				Config: config(restricted),
 				Check: resource.ComposeAggregateTestCheckFunc(
@@ -571,6 +611,7 @@ resource "stackshift_dedicated_database_public_access" "office" {
 					},
 				),
 			},
+			{ResourceName: name, ImportState: true, ImportStateId: "db-1:pol-1", ImportStateVerify: true},
 		},
 	})
 }
@@ -662,4 +703,106 @@ data "stackshift_database_credentials" "orders" {
 			),
 		}},
 	})
+}
+
+func TestDedicatedDatabaseConfigValidation(t *testing.T) {
+	startFakeDedicatedAPI(t, &fakeDedicatedAPI{})
+	config := func(name, window string) string {
+		return fmt.Sprintf(`
+resource "stackshift_dedicated_database" "orders" {
+  name           = %q
+  instance_class = "s-2vcpu-4gb"
+  storage_gb     = 20
+  maintenance_window = {
+    %s
+  }
+}
+`, name, window)
+	}
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: dedicatedFactories,
+		Steps: []resource.TestStep{
+			{Config: config("orders", "day_of_week = 7\n    start_minute = 0"), ExpectError: regexp.MustCompile(`day_of_week\s+is\s+0\s+\(Sunday\)\s+to\s+6`)},
+			{Config: config("orders", "day_of_week = 1\n    start_minute = 1440"), ExpectError: regexp.MustCompile(`start_minute\s+is\s+minutes\s+after\s+midnight\s+UTC,\s+0\s+to\s+1439`)},
+			{Config: config(" orders", "day_of_week = 1\n    start_minute = 60"), ExpectError: regexp.MustCompile(`Remove\s+the\s+surrounding\s+spaces`)},
+		},
+	})
+}
+
+func TestDedicatedDatabaseRemovedFromStateWhenDeleting(t *testing.T) {
+	fastPolling(t)
+	fake := &fakeDedicatedAPI{}
+	startFakeDedicatedAPI(t, fake)
+	config := dedicatedDatabaseConfig("s-2vcpu-4gb", "  timeouts = {\n    create = \"30m\"\n    delete = \"30m\"\n  }")
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: dedicatedFactories,
+		CheckDestroy: func(*terraform.State) error {
+			if !fake.deleted || fake.deleteReads != 2 {
+				return fmt.Errorf("deleted = %v after %d reads", fake.deleted, fake.deleteReads)
+			}
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{Config: config, Check: resource.TestCheckResourceAttr("stackshift_dedicated_database.orders", "id", "db-1")},
+			{
+				PreConfig: func() { fake.mu.Lock(); fake.status = "deleting"; fake.mu.Unlock() },
+				Config:    config,
+				Check: func(*terraform.State) error {
+					if fake.createCount != 2 {
+						return fmt.Errorf("creates = %d", fake.createCount)
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
+func TestPollDedicatedRetriesServerAndTransportErrors(t *testing.T) {
+	fastPolling(t)
+	calls := 0
+	err := pollDedicated(context.Background(), time.Minute, func(context.Context) (bool, error) {
+		calls++
+		switch calls {
+		case 1:
+			return false, &client.DedicatedError{StatusCode: http.StatusServiceUnavailable}
+		case 2:
+			return false, &url.Error{Op: "Get", URL: "https://api.example.test", Err: io.EOF}
+		case 3:
+			return false, nil
+		}
+		return true, nil
+	})
+	if err != nil || calls != 4 {
+		t.Fatalf("err = %v after %d calls", err, calls)
+	}
+}
+
+func TestPollDedicatedFailsAtOnceOnClientErrors(t *testing.T) {
+	fastPolling(t)
+	for name, failure := range map[string]error{
+		"bad request": &client.DedicatedError{StatusCode: http.StatusBadRequest},
+		"not found":   fmt.Errorf("%w: gone", client.ErrNotFound),
+		"conflict":    &client.DedicatedError{StatusCode: http.StatusConflict},
+		"other":       fmt.Errorf("the snapshot failed"),
+	} {
+		calls := 0
+		err := pollDedicated(context.Background(), time.Minute, func(context.Context) (bool, error) {
+			calls++
+			return false, failure
+		})
+		if !errors.Is(err, failure) || calls != 1 {
+			t.Fatalf("%s: err = %v after %d calls", name, err, calls)
+		}
+	}
+}
+
+func TestPollDedicatedReportsLastErrorAtDeadline(t *testing.T) {
+	fastPolling(t)
+	err := pollDedicated(context.Background(), 20*time.Millisecond, func(context.Context) (bool, error) {
+		return false, &client.DedicatedError{StatusCode: http.StatusBadGateway, Message: "upstream down"}
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "upstream down") {
+		t.Fatalf("err = %v", err)
+	}
 }

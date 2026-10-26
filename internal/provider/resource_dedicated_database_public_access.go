@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"time"
@@ -92,6 +93,16 @@ func (r *dedicatedDatabasePublicAccessResource) ValidateConfig(ctx context.Conte
 	if !expires.IsNull() && !expires.IsUnknown() && !utcTimestamp.MatchString(expires.ValueString()) {
 		resp.Diagnostics.AddAttributeError(path.Root("expires_at"), "Invalid time", "Use a UTC time such as 2026-12-01T00:00:00Z.")
 	}
+	if !cidrs.IsNull() && !cidrs.IsUnknown() {
+		var entries []types.String
+		resp.Diagnostics.Append(cidrs.ElementsAs(ctx, &entries, false)...)
+		for _, entry := range entries {
+			if !entry.IsUnknown() && !canonicalCIDR(entry.ValueString()) {
+				resp.Diagnostics.AddAttributeError(path.Root("allowed_cidrs"), "Use canonical address ranges",
+					fmt.Sprintf("%q isn't a network written the way StackShift stores it, such as 203.0.113.0/24. Use the network address with its prefix, and not 0.0.0.0/0.", entry.ValueString()))
+			}
+		}
+	}
 	if mode.IsNull() || mode.IsUnknown() {
 		return
 	}
@@ -104,7 +115,7 @@ func (r *dedicatedDatabasePublicAccessResource) ValidateConfig(ctx context.Conte
 			resp.Diagnostics.AddAttributeError(path.Root("acknowledge_public_exposure"), "Not used here", "acknowledge_public_exposure is only for anywhere access.")
 		}
 	case "anywhere":
-		if !cidrs.IsNull() || !expires.IsNull() {
+		if (!cidrs.IsNull() && !cidrs.IsUnknown()) || (!expires.IsNull() && !expires.IsUnknown()) {
 			resp.Diagnostics.AddAttributeError(path.Root("access_mode"), "Anywhere access takes no limit", "Leave out allowed_cidrs and expires_at for anywhere access.")
 		}
 		if !acknowledged.IsUnknown() && !acknowledged.ValueBool() {
@@ -115,6 +126,15 @@ func (r *dedicatedDatabasePublicAccessResource) ValidateConfig(ctx context.Conte
 	}
 }
 
+func canonicalCIDR(value string) bool {
+	ip, network, err := net.ParseCIDR(value)
+	if err != nil {
+		return false
+	}
+	ones, _ := network.Mask.Size()
+	return ones > 0 && ip.Equal(network.IP) && network.String() == value
+}
+
 func (r *dedicatedDatabasePublicAccessResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan dedicatedDatabasePublicAccessModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -122,7 +142,7 @@ func (r *dedicatedDatabasePublicAccessResource) Create(ctx context.Context, req 
 		return
 	}
 	databaseID := plan.DatabaseID.ValueString()
-	if err := waitDedicatedRunning(ctx, r.client, databaseID); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, databaseID, dedicatedWaitLimit); err != nil {
 		resp.Diagnostics.AddError("The database isn't ready for public access", dedicatedErrorDetail(err))
 		return
 	}
@@ -144,7 +164,7 @@ func (r *dedicatedDatabasePublicAccessResource) Create(ctx context.Context, req 
 	}
 	plan.apply(ctx, policy, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	err = pollDedicated(ctx, func(ctx context.Context) (bool, error) {
+	err = pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
 		current, err := r.client.GetDedicatedPublicAccess(ctx, databaseID, policy.ID)
 		if err != nil {
 			return false, err
@@ -200,11 +220,11 @@ func (r *dedicatedDatabasePublicAccessResource) Delete(ctx context.Context, req 
 		return
 	}
 	databaseID, id := state.DatabaseID.ValueString(), state.ID.ValueString()
-	if err := r.client.RevokeDedicatedPublicAccess(ctx, databaseID); err != nil {
+	if err := r.client.RevokeDedicatedPublicAccess(ctx, databaseID, id); err != nil {
 		resp.Diagnostics.AddError("Turn off StackShift public access failed", dedicatedErrorDetail(err))
 		return
 	}
-	err := pollDedicated(ctx, func(ctx context.Context) (bool, error) {
+	err := pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
 		policy, err := r.client.GetDedicatedPublicAccess(ctx, databaseID, id)
 		if notFound(err) || err == nil && (policy.Status == "revoked" || policy.Status == "expired") {
 			return true, nil
@@ -238,16 +258,14 @@ func (m *dedicatedDatabasePublicAccessModel) apply(ctx context.Context, policy *
 	if !sameInstant(m.ExpiresAt, policy.ExpiresAt) {
 		m.ExpiresAt = nonEmptyString(policy.ExpiresAt)
 	}
-	if (m.AllowedCIDRs.IsNull() || m.AllowedCIDRs.IsUnknown()) && len(policy.AllowedCIDRs) > 0 {
+	m.AllowedCIDRs = types.SetNull(types.StringType)
+	if len(policy.AllowedCIDRs) > 0 {
 		set, d := types.SetValueFrom(ctx, types.StringType, policy.AllowedCIDRs)
 		diags.Append(d...)
 		m.AllowedCIDRs = set
 	}
-	if m.AllowedCIDRs.IsUnknown() {
-		m.AllowedCIDRs = types.SetNull(types.StringType)
-	}
 	if m.AcknowledgePublicExposure.IsNull() || m.AcknowledgePublicExposure.IsUnknown() {
-		m.AcknowledgePublicExposure = types.BoolValue(false)
+		m.AcknowledgePublicExposure = types.BoolValue(policy.AccessMode == "anywhere")
 	}
 }
 

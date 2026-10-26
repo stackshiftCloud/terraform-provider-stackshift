@@ -15,6 +15,7 @@ import (
 
 var _ resource.ResourceWithConfigure = (*dedicatedDatabaseRestorePointResource)(nil)
 var _ resource.ResourceWithImportState = (*dedicatedDatabaseRestorePointResource)(nil)
+var _ resource.ResourceWithValidateConfig = (*dedicatedDatabaseRestorePointResource)(nil)
 
 func NewDedicatedDatabaseRestorePointResource() resource.Resource {
 	return &dedicatedDatabaseRestorePointResource{}
@@ -71,6 +72,10 @@ func (r *dedicatedDatabaseRestorePointResource) find(ctx context.Context, databa
 	return nil, client.ErrNotFound
 }
 
+func (r *dedicatedDatabaseRestorePointResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	validateUnpaddedName(ctx, req.Config, "name", &resp.Diagnostics)
+}
+
 func (r *dedicatedDatabaseRestorePointResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan dedicatedDatabaseRestorePointModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -78,7 +83,7 @@ func (r *dedicatedDatabaseRestorePointResource) Create(ctx context.Context, req 
 		return
 	}
 	databaseID := plan.DatabaseID.ValueString()
-	if err := waitDedicatedRunning(ctx, r.client, databaseID); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, databaseID, dedicatedWaitLimit); err != nil {
 		resp.Diagnostics.AddError("The database isn't ready for a restore point", dedicatedErrorDetail(err))
 		return
 	}
@@ -89,7 +94,7 @@ func (r *dedicatedDatabaseRestorePointResource) Create(ctx context.Context, req 
 	}
 	plan.apply(point)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	err = pollDedicated(ctx, func(ctx context.Context) (bool, error) {
+	err = pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
 		current, err := r.find(ctx, databaseID, point.ID)
 		if err != nil {
 			return false, err
@@ -149,7 +154,7 @@ func (r *dedicatedDatabaseRestorePointResource) Delete(ctx context.Context, req 
 		resp.Diagnostics.AddError("Delete StackShift restore point failed", dedicatedErrorDetail(err))
 		return
 	}
-	err := pollDedicated(ctx, func(ctx context.Context) (bool, error) {
+	err := pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
 		point, err := r.find(ctx, databaseID, id)
 		if notFound(err) || err == nil && point.Status == "deleted" {
 			return true, nil

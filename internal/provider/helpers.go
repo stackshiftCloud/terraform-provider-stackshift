@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/stackshift/terraform-provider-stackshift/internal/provider/client"
 )
@@ -128,4 +130,12 @@ func terraformMap(ctx context.Context, values map[string]string, diags *diag.Dia
 	out, d := types.MapValueFrom(ctx, types.StringType, values)
 	diags.Append(d...)
 	return out
+}
+
+func validateUnpaddedName(ctx context.Context, config tfsdk.Config, attribute string, diags *diag.Diagnostics) {
+	var value types.String
+	diags.Append(config.GetAttribute(ctx, path.Root(attribute), &value)...)
+	if !value.IsNull() && !value.IsUnknown() && value.ValueString() != strings.TrimSpace(value.ValueString()) {
+		diags.AddAttributeError(path.Root(attribute), "Remove the surrounding spaces", "StackShift trims spaces from this value, so Terraform would never see the stored value match your configuration.")
+	}
 }

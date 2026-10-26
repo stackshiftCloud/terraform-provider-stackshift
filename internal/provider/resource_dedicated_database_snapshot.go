@@ -15,6 +15,7 @@ import (
 
 var _ resource.ResourceWithConfigure = (*dedicatedDatabaseSnapshotResource)(nil)
 var _ resource.ResourceWithImportState = (*dedicatedDatabaseSnapshotResource)(nil)
+var _ resource.ResourceWithValidateConfig = (*dedicatedDatabaseSnapshotResource)(nil)
 
 func NewDedicatedDatabaseSnapshotResource() resource.Resource {
 	return &dedicatedDatabaseSnapshotResource{}
@@ -58,6 +59,10 @@ func (r *dedicatedDatabaseSnapshotResource) Schema(_ context.Context, _ resource
 	}
 }
 
+func (r *dedicatedDatabaseSnapshotResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	validateUnpaddedName(ctx, req.Config, "name", &resp.Diagnostics)
+}
+
 func (r *dedicatedDatabaseSnapshotResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan dedicatedDatabaseSnapshotModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -65,7 +70,7 @@ func (r *dedicatedDatabaseSnapshotResource) Create(ctx context.Context, req reso
 		return
 	}
 	databaseID := plan.DatabaseID.ValueString()
-	if err := waitDedicatedRunning(ctx, r.client, databaseID); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, databaseID, dedicatedWaitLimit); err != nil {
 		resp.Diagnostics.AddError("The database isn't ready for a snapshot", dedicatedErrorDetail(err))
 		return
 	}
@@ -76,7 +81,7 @@ func (r *dedicatedDatabaseSnapshotResource) Create(ctx context.Context, req reso
 	}
 	plan.apply(snapshot)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	err = pollDedicated(ctx, func(ctx context.Context) (bool, error) {
+	err = pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
 		current, err := r.client.GetDedicatedSnapshot(ctx, databaseID, snapshot.ID)
 		if err != nil {
 			return false, err
@@ -136,7 +141,7 @@ func (r *dedicatedDatabaseSnapshotResource) Delete(ctx context.Context, req reso
 		resp.Diagnostics.AddError("Delete StackShift snapshot failed", dedicatedErrorDetail(err))
 		return
 	}
-	err := pollDedicated(ctx, func(ctx context.Context) (bool, error) {
+	err := pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
 		_, err := r.client.GetDedicatedSnapshot(ctx, databaseID, id)
 		if notFound(err) {
 			return true, nil
