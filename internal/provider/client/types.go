@@ -274,14 +274,30 @@ type CreateDatabaseRequest struct {
 	TargetNodeID *string `json:"target_node_id,omitempty"`
 }
 
-type DatabaseCredentials struct {
-	Username         string `json:"username"`
-	Password         string `json:"password"`
-	DatabaseName     string `json:"database_name"`
+type DatabaseConnectionEndpoint struct {
+	Protocol         string `json:"protocol"`
+	Network          string `json:"network"`
+	Role             string `json:"role"`
+	Primary          bool   `json:"primary"`
 	Host             string `json:"host"`
 	Port             int    `json:"port"`
 	TLSMode          string `json:"tls_mode"`
+	TLSServerName    string `json:"tls_server_name"`
 	ConnectionString string `json:"connection_string"`
+	CAFilename       string `json:"ca_filename"`
+}
+
+type DatabaseCredentials struct {
+	Username         string                       `json:"username"`
+	Password         string                       `json:"password"`
+	DatabaseName     string                       `json:"database_name"`
+	Host             string                       `json:"host"`
+	Port             int                          `json:"port"`
+	TLSMode          string                       `json:"tls_mode"`
+	TLSServerName    string                       `json:"tls_server_name"`
+	CACertificate    string                       `json:"ca_certificate"`
+	ConnectionString string                       `json:"connection_string"`
+	Endpoints        []DatabaseConnectionEndpoint `json:"endpoints"`
 }
 
 type ProjectDomain struct {

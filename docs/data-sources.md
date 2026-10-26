@@ -34,7 +34,7 @@ data "stackshift_database_credentials" "postgres" {
 }
 ```
 
-All outputs are marked sensitive:
+All outputs are marked sensitive except `tls_server_name` and `ca_certificate`:
 
 - `username`
 - `password`
@@ -43,6 +43,9 @@ All outputs are marked sensitive:
 - `port`
 - `tls_mode`
 - `connection_string`
+- `endpoints`, every address the database answers on (including read replicas of a Dedicated database), each with `protocol`, `network`, `role`, `primary`, `host`, `port`, `tls_mode`, `tls_server_name`, `connection_string` and `ca_filename`
+
+`tls_server_name` and `ca_certificate` are the name to check and the certificate authority to trust when you connect with certificate verification.
 
 Use this data source to wire a managed database into project environment variables:
 
@@ -103,3 +106,58 @@ output "dedicated_cpu_classes" {
 ```
 
 Computed field: `classes`, a list with `slug`, `vcpu`, `memory_mb`, `cpu_policy` (`shared` or `dedicated`), `max_connections`, `pooled_max_connections`, `disk_iops`, `disk_bytes_per_sec`, `network_kbps`, `active`, `currency`, `monthly_price_minor`, `storage_gb_month_price_minor` and `backup_gb_month_price_minor`. Price fields are passed through from the API in the currency's smallest unit.
+
+## `stackshift_dedicated_database`
+
+Reads a Dedicated database by id, from `GET /databases/{id}`.
+
+```hcl
+data "stackshift_dedicated_database" "orders" {
+  id = "database-uuid"
+}
+
+output "orders_endpoints" {
+  value = data.stackshift_dedicated_database.orders.endpoints
+}
+```
+
+Computed fields: `project_id`, `name`, `engine` (`postgres` or `mysql`), `version`, `status`, `instance_class`, `allocated_storage_gb`, `storage_max_gb`, `backup_retention_days`, `deletion_protection`, `maintenance_window` (`day_of_week`, `start_minute`), `billing`, `billing_status`, `standby`, `on_standby_loss`, `master_username`, `database_name`, `host`, `port`, `tls_mode`, `endpoints` (`protocol`, `network`, `role`, `host`, `port`, `tls_mode`, `primary`) and `members`, a list with `id`, `role` (`primary`, `standby` or `replica`), `instance_class`, `status` and `site`. Passwords are never returned; use `stackshift_database_credentials` for connection details.
+
+## `stackshift_dedicated_database_backups`
+
+Lists the backups of a Dedicated database and the time window it can be restored to, from `GET /databases/{id}/backups`. Use it to pick a `target_time` or a `backup_id` for `restore_from`.
+
+```hcl
+data "stackshift_dedicated_database_backups" "orders" {
+  database_id = stackshift_dedicated_database.orders.id
+}
+
+resource "stackshift_dedicated_database" "restored" {
+  name           = "orders-restored"
+  instance_class = "s-2vcpu-4gb"
+  storage_gb     = 20
+
+  restore_from = {
+    source_database_id = stackshift_dedicated_database.orders.id
+    target_time        = data.stackshift_dedicated_database_backups.orders.restorable_until
+  }
+}
+```
+
+Computed fields: `retention_days`, `restorable_from` and `restorable_until` (RFC 3339 times, empty until a first backup exists) and `backups`, a list with `id`, `kind` (`scheduled`, `manual` or `final`), `repo`, `name`, `status`, `size_bytes`, `started_at` and `finished_at`.
+
+## `stackshift_database_parameter_definitions`
+
+Lists the engine settings you can put in a parameter group for one engine version, from `GET /databases/parameter-definitions`.
+
+```hcl
+data "stackshift_database_parameter_definitions" "postgres17" {
+  family = "postgres17"
+}
+
+output "settings_that_need_a_restart" {
+  value = [for parameter in data.stackshift_database_parameter_definitions.postgres17.parameters : parameter.name if parameter.needs_restart]
+}
+```
+
+Argument: `family`, one of `postgres15`, `postgres16`, `postgres17`, `postgres18` or `mysql8.4`. Computed field: `parameters`, a list with `name`, `kind`, `min`, `max`, `values` (for settings that take a fixed set), `needs_restart`, `engine_default` and `description`.

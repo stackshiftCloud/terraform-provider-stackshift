@@ -373,7 +373,7 @@ terraform import stackshift_bucket.uploads <bucket_id>
 
 ## `stackshift_dedicated_database`
 
-Manages a Dedicated PostgreSQL database through `/api/v1/databases` (or `/api/v1/projects/{project_id}/databases` when `project_id` is set). Dedicated databases must be switched on for your account; otherwise the API answers 403. Dedicated is a paid product: see https://stackshift.cloud/pricing.
+Manages a Dedicated PostgreSQL or MySQL database through `/api/v1/databases` (or `/api/v1/projects/{project_id}/databases` when `project_id` is set). Dedicated databases must be switched on for your account; otherwise the API answers 403. Dedicated is a paid product: see https://stackshift.cloud/pricing.
 
 The master password is returned only once, when the database is created. It is stored in sensitive Terraform state as `master_password`, so keep state in an encrypted remote backend with restricted access. Import can't recover it.
 
@@ -381,25 +381,40 @@ The master password is returned only once, when the database is created. It is s
 
 | Name | Required | Notes |
 | --- | --- | --- |
-| `name` | yes | 3 to 40 lowercase letters, digits and dashes. Changes replace the database. |
+| `name` | yes | 3 to 40 lowercase letters, digits and dashes. Changes in place; the database keeps its address. |
 | `instance_class` | yes | A slug from `stackshift_database_instance_classes`. Changes in place. |
 | `storage_gb` | yes | 10 to 1024. Grows in place; it can't shrink. When autogrow raises the size above this value, Terraform doesn't treat it as drift; read the real size from `allocated_storage_gb`. A value below the current size is recorded without a change, since storage can't shrink. |
 | `storage_max_gb` | no | Autogrow limit. The server default is twice `storage_gb`, up to 1024. Changes in place. |
+| `engine` | no | `postgres` (default) or `mysql`. Changes replace the database. |
+| `version` | no | PostgreSQL `15` to `18` (default `17`) or MySQL `8.4` (default `8.4`). Changes replace the database. |
 | `project_id` | no | Owning project. Changes replace the database. |
-| `version` | no | PostgreSQL `15` to `18`; defaults to `17`. Changes replace the database. |
-| `master_username` | no | Defaults to `app_owner`. Changes replace the database. |
+| `master_username` | no | Defaults to `app_owner`. Changes replace the database. MySQL user names are at most 32 characters. |
 | `database_name` | no | Defaults to `app`. Changes replace the database. |
 | `backup_retention_days` | no | 7 to 35; defaults to 7. Changes in place. |
 | `deletion_protection` | no | Defaults to `false`. While true, the API refuses to delete the database. Changes in place, so set it to `false` and apply before destroying. |
-| `maintenance_window` | no | `{ day_of_week = 0-6, start_minute = 0-1439 }`. Picked at random when left out, then read back. Changes in place; a size change waiting for the window moves with it. |
-| `billing` | no | `monthly` (default), `yearly` or `hourly`. Changes replace the database. |
+| `maintenance_window` | no | `{ day_of_week = 0-6, start_minute = 0-1439 }`, in UTC. Picked at random when left out, then read back. Changes in place; a size change waiting for the window moves with it. |
+| `billing` | no | `monthly` (default), `yearly` or `hourly`. Changes in place. A switch between prepaid periods takes effect at the next renewal and Terraform shows the new value straight away; a switch away from hourly is charged now and follows the paid-change rules below. |
 | `standby` | no | `off` (default), `sync` or `async`. Changes in place. |
 | `on_standby_loss` | no | `degrade` (default) or `block`. Changes in place. |
 | `apply_changes` | no | When a size change runs: `window` (default, in the maintenance window) or `now`. |
 | `accept_price_changes` | no | Defaults to `false`. See paid changes below. |
 | `skip_final_snapshot` | no | Defaults to `false`, so destroy takes a final snapshot first. Set `true` to delete without one. |
+| `restore_from` | no | Creates the database as a restore of another Dedicated database. See restoring below. |
 
-Computed attributes: `id`, `master_password`, `allocated_storage_gb` (the current storage size, including autogrow), `status`, `host`, `port`, `endpoints` (`protocol`, `network`, `role`, `host`, `port`, `tls_mode`, `primary`), `billing_status` and `checkout_url`.
+Computed attributes: `id`, `master_password`, `allocated_storage_gb` (the current storage size, including autogrow), `status`, `host`, `port`, `endpoints` (`protocol`, `network`, `role`, `host`, `port`, `tls_mode`, `primary`; read replicas that have caught up appear with their own role), `billing_status` and `checkout_url`.
+
+### MySQL
+
+Set `engine = "mysql"`. MySQL supports the same sizes, storage, standby, read replicas, backups, restore, fast restore points, parameter groups and settings as PostgreSQL. Only version `8.4` is offered, and a major-version upgrade is currently available for PostgreSQL only.
+
+```hcl
+resource "stackshift_dedicated_database" "shop" {
+  name           = "shop"
+  engine         = "mysql"
+  instance_class = data.stackshift_database_instance_classes.all.classes[0].slug
+  storage_gb     = 20
+}
+```
 
 ### Paying for a new database
 
@@ -407,7 +422,35 @@ When the wallet covers the first payment (or the first hour on hourly billing), 
 
 ### Paid changes
 
-Size changes, standby changes and storage growth are prorated. Deletion protection, backup retention and the maintenance window are free to change. When a change costs extra, the API returns a quote. With `accept_price_changes = false` the apply stops with the charge, the new monthly price and the currency; set `accept_price_changes = true` and apply again to go ahead. With `true`, the provider confirms the quoted charge and adds a warning with the amount. If the wallet doesn't cover the charge, the apply stops and asks you to top up the wallet. Downgrades and removals credit the wallet automatically.
+Size changes, standby changes, storage growth and a switch away from hourly billing are prorated. Deletion protection, backup retention, the name and the maintenance window are free to change. When a change costs extra, the API returns a quote. With `accept_price_changes = false` the apply stops with the charge, the new monthly price and the currency; set `accept_price_changes = true` and apply again to go ahead. With `true`, the provider confirms the quoted charge and adds a warning with the amount. If the wallet doesn't cover the charge, the apply stops and asks you to top up the wallet. Downgrades and removals credit the wallet automatically.
+
+### Restoring into a new database
+
+`restore_from` creates the database from another Dedicated database's backups instead of starting empty. The source isn't changed, and the new database gets its own address and master password.
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `source_database_id` | yes | The Dedicated database to restore from. |
+| `target_time` | one of the two | Restore to this moment, as an RFC 3339 time inside the source's restorable window. |
+| `backup_id` | one of the two | Restore from this backup or snapshot of the source. |
+| `from_mirror` | no | Read the restore from the second backup copy. |
+
+Use `stackshift_dedicated_database_backups` to see the restorable window and the backup ids. `instance_class` and `storage_gb` are required as usual; `storage_gb` can't be below the source's. The engine, version, `master_username`, `database_name`, `backup_retention_days`, `storage_max_gb` and the maintenance window come from the source, so setting them (or `deletion_protection = true`, `standby` or `on_standby_loss`) together with `restore_from` stops the apply before anything is created. Set them in a later apply once the database exists.
+
+`restore_from` only matters when the database is created. Changing or removing it plans a replacement, so after the restore add `lifecycle { ignore_changes = [restore_from] }` and then remove the block.
+
+```hcl
+resource "stackshift_dedicated_database" "orders_before_incident" {
+  name           = "orders-before-incident"
+  instance_class = "s-2vcpu-4gb"
+  storage_gb     = 20
+
+  restore_from = {
+    source_database_id = stackshift_dedicated_database.orders.id
+    target_time        = "2026-10-25T14:30:00Z"
+  }
+}
+```
 
 ### Import
 
@@ -415,7 +458,7 @@ Size changes, standby changes and storage growth are prorated. Deletion protecti
 terraform import stackshift_dedicated_database.orders <database_id>
 ```
 
-Import reads every setting back from the API except `master_password` and `master_username`.
+Import reads every setting back from the API except `master_password`, `master_username` and `restore_from`.
 
 ## `stackshift_dedicated_database_replica`
 
@@ -435,4 +478,156 @@ Computed attributes: `id`, `status` and `site`.
 
 ```sh
 terraform import stackshift_dedicated_database_replica.read <database_id>:<replica_id>
+```
+
+## `stackshift_database_parameter_group`
+
+A named set of engine settings for Dedicated databases, through `/databases/parameter-groups`. A group is for one engine version (its `family`) and can be attached to any number of databases of that version with `stackshift_dedicated_database_parameter_group_attachment`. Changing the settings of a group updates every database that uses it. Groups are free.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `name` | yes | 1 to 60 characters, unique in your account. Changes in place. |
+| `family` | yes | `postgres15`, `postgres16`, `postgres17`, `postgres18` or `mysql8.4`. Changes replace the group. |
+| `description` | no | Changes in place. |
+| `parameters` | no | A map of setting names to values. Use `stackshift_database_parameter_definitions` to see what a family accepts. Changes in place. |
+
+Computed attributes: `id`, `version` (goes up each time the group changes) and `databases` (how many databases use it). A group that is still attached can't be deleted; destroy the attachments first.
+
+```hcl
+resource "stackshift_database_parameter_group" "tuned" {
+  name   = "tuned"
+  family = "postgres17"
+
+  parameters = {
+    work_mem          = "65536"
+    statement_timeout = "30000"
+  }
+}
+```
+
+### Import
+
+```sh
+terraform import stackshift_database_parameter_group.tuned <group_id>
+```
+
+## `stackshift_dedicated_database_parameter_group_attachment`
+
+Attaches a parameter group to a Dedicated database through `PUT /databases/{id}/parameter-group`. The database must be running, so the apply waits for a new database to finish starting. The group has to be for the database's engine and version. Changing `parameter_group_id` switches the group in place. Destroying the attachment detaches the group and returns the database to its default settings.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `database_id` | yes | The Dedicated database. Changes replace the attachment. |
+| `parameter_group_id` | yes | A `stackshift_database_parameter_group` id. Changes in place. |
+| `restart_to_apply` | no | Defaults to `false`. When `true`, the database restarts right after the group is attached or switched, so settings that need a restart take effect. Connections drop briefly. |
+
+Computed attributes: `id` (the database id), `applied` (whether the database runs with the group's settings) and `pending_restart` (settings waiting for a restart).
+
+### Import
+
+```sh
+terraform import stackshift_dedicated_database_parameter_group_attachment.tuned <database_id>
+```
+
+## `stackshift_dedicated_database_snapshot`
+
+A snapshot of a Dedicated database that is kept until you delete it, through `/databases/{id}/backups`. The database must be running. The apply waits until the snapshot is ready, and destroy waits until it is gone. Use the snapshot id as `restore_from.backup_id`. Automated backups are removed by StackShift when they age out of `backup_retention_days`, so they aren't managed here.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `database_id` | yes | The Dedicated database. Changes replace the snapshot. |
+| `name` | no | Up to 100 characters. Changes replace the snapshot. |
+
+Computed attributes: `id`, `kind`, `status`, `size_bytes` and `created_at`.
+
+### Import
+
+```sh
+terraform import stackshift_dedicated_database_snapshot.before <database_id>:<snapshot_id>
+```
+
+## `stackshift_dedicated_database_restore_point`
+
+A fast restore point of a Dedicated database, taken on demand through `/databases/{id}/restore-points` and kept until you delete it. The database must be running and fast restore points must be available for it. You can keep a limited number of your own. The apply waits until the restore point is ready. Rolling a database back to a restore point replaces its data, so Terraform doesn't do it; use the dashboard or the API for that.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `database_id` | yes | The Dedicated database. Changes replace the restore point. |
+| `name` | no | Up to 100 characters. Changes replace the restore point. |
+
+Computed attributes: `id`, `kind`, `status`, `size_gb` and `taken_at`.
+
+### Import
+
+```sh
+terraform import stackshift_dedicated_database_restore_point.nightly <database_id>:<restore_point_id>
+```
+
+## `stackshift_dedicated_database_restore_schedule`
+
+How often a Dedicated database takes automatic fast restore points, through `/databases/{id}/restore-points/schedules`. Every database has a `daily`, a `weekly` and a `monthly` schedule. Schedules you leave out keep their current settings. The database must be running. Destroying this resource only stops Terraform from managing the schedules; they keep their last settings.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `database_id` | yes | The Dedicated database. Changes replace the resource. |
+| `daily`, `weekly`, `monthly` | no | `{ enabled = bool, keep = 1-30 }`. Each changes in place. |
+
+Computed attributes: `id` (the database id) and the settings of the schedules you leave out.
+
+### Import
+
+```sh
+terraform import stackshift_dedicated_database_restore_schedule.plan <database_id>
+```
+
+## `stackshift_dedicated_database_public_access`
+
+Lets people outside StackShift reach a Dedicated database through a secure public address, using `/databases/{id}/public-access`. The database must be running and public access must be available for it. The apply waits until the address is active, and destroy waits until access is off. Changing any setting replaces the access, which turns it off for a moment.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `database_id` | yes | The Dedicated database. |
+| `access_mode` | yes | `restricted` lets only `allowed_cidrs` connect until `expires_at`. `anywhere` lets any address connect and renews itself. |
+| `allowed_cidrs` | restricted | Address ranges that may connect, such as `203.0.113.0/24`. |
+| `expires_at` | restricted | When access ends, as a UTC time such as `2026-12-01T00:00:00Z`, between one hour from now and the platform limit. When it passes, the access is gone and the next apply needs a new future time. For `anywhere` it is a computed renewal time. |
+| `acknowledge_public_exposure` | anywhere | Set to `true` to confirm that any address can connect. |
+
+Computed attributes: `id`, `status`, `public_hostname` and `public_port`. Connect to `public_hostname` and `public_port` with the credentials from `stackshift_database_credentials`.
+
+### Import
+
+```sh
+terraform import stackshift_dedicated_database_public_access.office <database_id>:<policy_id>
+```
+
+## `stackshift_dedicated_database_insights`
+
+How long a Dedicated database keeps its performance history, through `/databases/{id}/insights`. Keeping history longer than the included days is a paid change and follows the same `accept_price_changes` rules as `stackshift_dedicated_database`. Destroying this resource returns the database to the included days.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `database_id` | yes | The Dedicated database. Changes replace the resource. |
+| `retention_days` | yes | `7`, `30` or `90`. Changes in place. |
+| `accept_price_changes` | no | Defaults to `false`. |
+
+Computed attributes: `id` (the database id) and `included_days`.
+
+### Import
+
+```sh
+terraform import stackshift_dedicated_database_insights.history <database_id>
 ```

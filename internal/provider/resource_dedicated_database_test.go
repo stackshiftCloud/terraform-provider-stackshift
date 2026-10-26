@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
@@ -30,11 +31,14 @@ import (
 type dedicatedOnlyProvider struct{ stackshiftProvider }
 
 func (dedicatedOnlyProvider) Resources(context.Context) []func() frameworkresource.Resource {
-	return []func() frameworkresource.Resource{NewDedicatedDatabaseResource, NewDedicatedDatabaseReplicaResource}
+	return []func() frameworkresource.Resource{NewDedicatedDatabaseResource, NewDedicatedDatabaseReplicaResource, NewDatabaseParameterGroupResource,
+		NewDedicatedParameterGroupAttachmentResource, NewDedicatedDatabaseSnapshotResource, NewDedicatedDatabaseRestorePointResource,
+		NewDedicatedDatabaseRestoreScheduleResource, NewDedicatedDatabasePublicAccessResource, NewDedicatedDatabaseInsightsResource}
 }
 
 func (dedicatedOnlyProvider) DataSources(context.Context) []func() datasource.DataSource {
-	return []func() datasource.DataSource{NewDatabaseInstanceClassesDataSource}
+	return []func() datasource.DataSource{NewDatabaseInstanceClassesDataSource, NewDatabaseCredentialsDataSource, NewDatabaseParameterDefinitionsDataSource,
+		NewDedicatedDatabaseDataSource, NewDedicatedDatabaseBackupsDataSource}
 }
 
 const fakeCheckoutURL = "https://pay.example.test/checkout/abc"
@@ -55,6 +59,13 @@ type fakeDedicatedAPI struct {
 	createBody      map[string]any
 	settings        map[string]any
 	settingsPatches []map[string]any
+	engine          string
+	version         string
+	name            string
+	nextBilling     string
+	billingPuts     []map[string]any
+	restoreBody     map[string]any
+	management      managementState
 }
 
 func (f *fakeDedicatedAPI) database() map[string]any {
@@ -62,9 +73,19 @@ func (f *fakeDedicatedAPI) database() map[string]any {
 	for key, value := range f.settings {
 		dedicated[key] = value
 	}
-	return map[string]any{"id": "db-1", "tier": "dedicated", "dedicated": dedicated, "name": "orders", "type": "postgres", "version": "17", "status": f.status,
-		"host": "db-1.stackshift.internal", "port": 5432, "database_name": "app",
-		"endpoints": []map[string]any{{"protocol": "postgres", "network": "private", "role": "primary", "host": "db-1.stackshift.internal", "port": 5432, "tls_mode": "require", "primary": true}}}
+	engine, version, name := f.engine, f.version, f.name
+	if engine == "" {
+		engine = "postgres"
+	}
+	if version == "" {
+		version = "17"
+	}
+	if name == "" {
+		name = "orders"
+	}
+	return map[string]any{"id": "db-1", "tier": "dedicated", "dedicated": dedicated, "name": name, "type": engine, "version": version, "status": f.status,
+		"host": "db-1.stackshift.internal", "port": 5432, "tls_mode": "require", "database_name": "app",
+		"endpoints": []map[string]any{{"protocol": engine, "network": "private", "role": "primary", "host": "db-1.stackshift.internal", "port": 5432, "tls_mode": "require", "primary": true}}}
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -113,6 +134,16 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}})
 	case "POST /databases":
 		f.created, f.createBody, f.class = true, body, body["instance_class"].(string)
+		f.engine, f.version = body["type"].(string), "17"
+		if f.engine == "mysql" {
+			f.version = "8.4"
+		}
+		if requested, ok := body["version"].(string); ok {
+			f.version = requested
+		}
+		if body["backup_retention_days"] == nil {
+			body["backup_retention_days"] = float64(7)
+		}
 		window := body["maintenance_window"]
 		if window == nil {
 			window = map[string]any{"day_of_week": 3, "start_minute": 60}
@@ -131,9 +162,22 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeOK(w, http.StatusAccepted, map[string]any{"database": f.database(), "master_password": "s3cret-once", "checkout": map[string]any{"status": "paid"}})
 	case "GET /databases/db-1":
 		writeOK(w, http.StatusOK, f.database())
+	case "POST /databases/src-1/restore":
+		f.created, f.restoreBody, f.class, f.engine, f.version, f.name, f.status = true, body, body["instance_class"].(string), "mysql", "8.4", body["name"].(string), "restoring"
+		f.settings = map[string]any{"storage_gb": body["storage_gb"], "storage_max_gb": 80, "backup_retention_days": 14, "deletion_protection": false,
+			"maintenance_window": map[string]any{"day_of_week": 1, "start_minute": 30}, "billing": body["billing"], "standby": "off", "on_standby_loss": "degrade"}
+		writeOK(w, http.StatusAccepted, map[string]any{"database": f.database(), "master_password": "restored-once", "checkout": map[string]any{"status": "paid"}})
+	case "PUT /databases/db-1/billing":
+		f.billingPuts = append(f.billingPuts, body)
+		f.nextBilling = body["billing"].(string)
+		writeOK(w, http.StatusOK, map[string]any{"billing": map[string]any{"mode": f.nextBilling}})
 	case "PATCH /databases/db-1":
 		f.settingsPatches = append(f.settingsPatches, body)
 		for key, value := range body {
+			if key == "name" {
+				f.name = value.(string)
+				continue
+			}
 			f.settings[key] = value
 		}
 		writeOK(w, http.StatusOK, f.database())
@@ -142,7 +186,11 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.status == "pending_payment" {
 			status = "pending_payment"
 		}
-		writeOK(w, http.StatusOK, map[string]any{"mode": "monthly", "status": status, "currency": "NGN"})
+		billing := map[string]any{"mode": "monthly", "status": status, "currency": "NGN"}
+		if f.nextBilling != "" {
+			billing["next_billing"] = map[string]any{"billing": f.nextBilling, "effective_at": "2026-11-26T00:00:00Z"}
+		}
+		writeOK(w, http.StatusOK, billing)
 	case "GET /databases/db-1/ha":
 		members := []map[string]any{}
 		if f.status != "pending_payment" {
@@ -171,7 +219,9 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.deleted, f.deleteQuery = true, r.URL.RawQuery
 		writeOK(w, http.StatusAccepted, map[string]any{"status": "deleting"})
 	default:
-		writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "message": "no route " + route})
+		if !f.management.serve(f, w, route, r.URL.Query().Get("family"), body) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "message": "no route " + route})
+		}
 	}
 }
 
@@ -359,9 +409,9 @@ func TestDedicatedDatabaseCreatePaymentRequiredWarningHasCheckoutURL(t *testing.
 	objectType := schemaResp.Schema.Type().TerraformType(ctx)
 	plan := tfsdk.Plan{Schema: schemaResp.Schema, Raw: tftypes.NewValue(objectType, nil)}
 	model := dedicatedDatabaseModel{
-		ID: types.StringUnknown(), Name: types.StringValue("orders"), Version: types.StringValue("17"), InstanceClass: types.StringValue("s-2vcpu-4gb"),
-		StorageGB: types.Int64Value(20), MasterUsername: types.StringValue("app_owner"), DatabaseName: types.StringValue("app"),
-		BackupRetentionDays: types.Int64Value(7), StorageMaxGB: types.Int64Unknown(), AllocatedStorageGB: types.Int64Unknown(), MaintenanceWindow: types.ObjectUnknown(maintenanceWindowType.AttrTypes), DeletionProtection: types.BoolValue(false), Billing: types.StringValue("monthly"),
+		ID: types.StringUnknown(), ProjectID: types.StringUnknown(), Name: types.StringValue("orders"), Engine: types.StringUnknown(), Version: types.StringUnknown(),
+		InstanceClass: types.StringValue("s-2vcpu-4gb"), StorageGB: types.Int64Value(20), MasterUsername: types.StringUnknown(), DatabaseName: types.StringUnknown(),
+		RestoreFrom: types.ObjectNull(map[string]attr.Type{"source_database_id": types.StringType, "target_time": types.StringType, "backup_id": types.StringType, "from_mirror": types.BoolType}), BackupRetentionDays: types.Int64Unknown(), StorageMaxGB: types.Int64Unknown(), AllocatedStorageGB: types.Int64Unknown(), MaintenanceWindow: types.ObjectUnknown(maintenanceWindowType.AttrTypes), DeletionProtection: types.BoolValue(false), Billing: types.StringValue("monthly"),
 		Standby: types.StringValue("off"), OnStandbyLoss: types.StringValue("degrade"), ApplyChanges: types.StringValue("window"),
 		AcceptPriceChanges: types.BoolValue(false), SkipFinalSnapshot: types.BoolValue(false), MasterPassword: types.StringUnknown(),
 		Status: types.StringUnknown(), Host: types.StringUnknown(), Port: types.Int64Unknown(), Endpoints: types.ListUnknown(dedicatedEndpointType),

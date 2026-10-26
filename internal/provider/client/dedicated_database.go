@@ -150,12 +150,18 @@ type DedicatedHA struct {
 	SizeChange       *DedicatedSizeChange `json:"size_change"`
 }
 
+type DedicatedNextBilling struct {
+	Mode        string `json:"billing"`
+	EffectiveAt string `json:"effective_at"`
+}
+
 type DedicatedBilling struct {
-	Mode              string `json:"mode"`
-	Status            string `json:"status"`
-	Currency          string `json:"currency"`
-	MonthlyPriceMinor int64  `json:"monthly_price_minor"`
-	CurrentPeriodEnd  string `json:"current_period_end"`
+	Mode              string                `json:"mode"`
+	Status            string                `json:"status"`
+	Currency          string                `json:"currency"`
+	MonthlyPriceMinor int64                 `json:"monthly_price_minor"`
+	CurrentPeriodEnd  string                `json:"current_period_end"`
+	NextBilling       *DedicatedNextBilling `json:"next_billing"`
 }
 
 type DedicatedReplica struct {
@@ -288,9 +294,24 @@ func (c *Client) CreateDedicatedDatabase(ctx context.Context, projectID string, 
 		path = "/projects/" + url.PathEscape(projectID) + "/databases"
 	}
 	req.Tier = "dedicated"
-	req.Type = "postgres"
 	var result DedicatedCreateResult
 	err := c.dedicatedDo(ctx, http.MethodPost, path, req, &result)
+	return &result, err
+}
+
+type RestoreDedicatedDatabaseRequest struct {
+	Name          string `json:"name"`
+	TargetTime    string `json:"target_time,omitempty"`
+	BackupID      string `json:"backup_id,omitempty"`
+	InstanceClass string `json:"instance_class,omitempty"`
+	StorageGB     int64  `json:"storage_gb,omitempty"`
+	FromMirror    bool   `json:"from_mirror,omitempty"`
+	Billing       string `json:"billing,omitempty"`
+}
+
+func (c *Client) RestoreDedicatedDatabase(ctx context.Context, sourceID string, req RestoreDedicatedDatabaseRequest) (*DedicatedCreateResult, error) {
+	var result DedicatedCreateResult
+	err := c.dedicatedDo(ctx, http.MethodPost, dedicatedPath(sourceID, "/restore"), req, &result)
 	return &result, err
 }
 
@@ -316,6 +337,12 @@ func (c *Client) UpdateDedicatedSettings(ctx context.Context, id string, changes
 	var db DedicatedDatabase
 	err := c.dedicatedDo(ctx, http.MethodPatch, dedicatedPath(id, ""), changes, &db)
 	return &db, err
+}
+
+func (c *Client) SetDedicatedBilling(ctx context.Context, id, mode string, confirmChargeMinor *int64) error {
+	return c.dedicatedDo(ctx, http.MethodPut, dedicatedPath(id, "/billing"), map[string]any{
+		"billing": mode, "confirm_charge_minor": confirmChargeMinor,
+	}, nil)
 }
 
 func (c *Client) ChangeDedicatedClass(ctx context.Context, id, instanceClass, apply string, confirmChargeMinor *int64) error {

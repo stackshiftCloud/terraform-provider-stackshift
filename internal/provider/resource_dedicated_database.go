@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -11,7 +14,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
-	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
@@ -36,6 +38,13 @@ type dedicatedMaintenanceWindowModel struct {
 	StartMinute types.Int64 `tfsdk:"start_minute"`
 }
 
+type dedicatedRestoreFromModel struct {
+	SourceDatabaseID types.String `tfsdk:"source_database_id"`
+	TargetTime       types.String `tfsdk:"target_time"`
+	BackupID         types.String `tfsdk:"backup_id"`
+	FromMirror       types.Bool   `tfsdk:"from_mirror"`
+}
+
 type dedicatedEndpointModel struct {
 	Protocol types.String `tfsdk:"protocol"`
 	Network  types.String `tfsdk:"network"`
@@ -48,6 +57,8 @@ type dedicatedEndpointModel struct {
 
 var maintenanceWindowType = types.ObjectType{AttrTypes: map[string]attr.Type{"day_of_week": types.Int64Type, "start_minute": types.Int64Type}}
 
+var dedicatedEngineVersions = map[string][]string{"postgres": {"15", "16", "17", "18"}, "mysql": {"8.4"}}
+
 var dedicatedEndpointType = types.ObjectType{AttrTypes: map[string]attr.Type{
 	"protocol": types.StringType, "network": types.StringType, "role": types.StringType, "host": types.StringType,
 	"port": types.Int64Type, "tls_mode": types.StringType, "primary": types.BoolType,
@@ -57,6 +68,7 @@ type dedicatedDatabaseModel struct {
 	ID                  types.String `tfsdk:"id"`
 	ProjectID           types.String `tfsdk:"project_id"`
 	Name                types.String `tfsdk:"name"`
+	Engine              types.String `tfsdk:"engine"`
 	Version             types.String `tfsdk:"version"`
 	InstanceClass       types.String `tfsdk:"instance_class"`
 	StorageGB           types.Int64  `tfsdk:"storage_gb"`
@@ -80,6 +92,7 @@ type dedicatedDatabaseModel struct {
 	Endpoints           types.List   `tfsdk:"endpoints"`
 	BillingStatus       types.String `tfsdk:"billing_status"`
 	CheckoutURL         types.String `tfsdk:"checkout_url"`
+	RestoreFrom         types.Object `tfsdk:"restore_from"`
 }
 
 func (r *dedicatedDatabaseResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -92,6 +105,22 @@ func (r *dedicatedDatabaseResource) Configure(_ context.Context, req resource.Co
 	}
 }
 
+type keepStateWhenUnsetString struct{}
+
+func (keepStateWhenUnsetString) Description(context.Context) string {
+	return "Keeps the recorded value when the setting is left out of the configuration."
+}
+
+func (m keepStateWhenUnsetString) MarkdownDescription(ctx context.Context) string {
+	return m.Description(ctx)
+}
+
+func (keepStateWhenUnsetString) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	if req.ConfigValue.IsNull() && !req.State.Raw.IsNull() {
+		resp.PlanValue = req.StateValue
+	}
+}
+
 func replaceIfSetString() []planmodifier.String {
 	return []planmodifier.String{stringplanmodifier.RequiresReplaceIf(func(_ context.Context, req planmodifier.StringRequest, resp *stringplanmodifier.RequiresReplaceIfFuncResponse) {
 		resp.RequiresReplace = !req.StateValue.IsNull()
@@ -100,35 +129,38 @@ func replaceIfSetString() []planmodifier.String {
 
 func (r *dedicatedDatabaseResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	keepString := []planmodifier.String{stringplanmodifier.UseStateForUnknown()}
+	keepThenReplace := []planmodifier.String{keepStateWhenUnsetString{}, stringplanmodifier.RequiresReplace()}
 	resp.Schema = schema.Schema{
-		Description: "A Dedicated PostgreSQL database. Dedicated must be switched on for your account. Prices: https://stackshift.cloud/pricing.",
+		Description: "A Dedicated PostgreSQL or MySQL database. Dedicated must be switched on for your account. Prices: https://stackshift.cloud/pricing.",
 		Attributes: map[string]schema.Attribute{
-			"id":             schema.StringAttribute{Computed: true, PlanModifiers: keepString},
-			"project_id":     schema.StringAttribute{Optional: true, PlanModifiers: replaceString()},
-			"name":           schema.StringAttribute{Required: true, PlanModifiers: replaceString()},
-			"version":        schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("17"), PlanModifiers: replaceString()},
+			"id":         schema.StringAttribute{Computed: true, PlanModifiers: keepString},
+			"project_id": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: keepThenReplace},
+			"name":       schema.StringAttribute{Required: true, Description: "3 to 40 lowercase letters, digits and dashes. Changes in place."},
+			"engine": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: keepThenReplace,
+				Description: "postgres (default) or mysql. Changing this replaces the database."},
+			"version": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: keepThenReplace,
+				Description: "PostgreSQL 15 to 18 (default 17) or MySQL 8.4 (default). Changing this replaces the database."},
 			"instance_class": schema.StringAttribute{Required: true, Description: "A slug from stackshift_database_instance_classes. Changes in place."},
 			"storage_gb":     schema.Int64Attribute{Required: true, Description: "10 to 1024. Grows in place; it can't shrink. Growth from autogrow isn't reported as drift."},
 			"storage_max_gb": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 				Description: "Autogrow limit. The server default is twice storage_gb, up to 1024. Changes in place."},
 			"allocated_storage_gb": schema.Int64Attribute{Computed: true, Description: "The current storage size, including growth from autogrow."},
-			"master_username": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("app_owner"),
-				PlanModifiers: replaceIfSetString()},
-			"database_name": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("app"), PlanModifiers: replaceString()},
-			"backup_retention_days": schema.Int64Attribute{Optional: true, Computed: true, Default: int64default.StaticInt64(7),
-				Description: "7 to 35. Changes in place."},
+			"master_username": schema.StringAttribute{Optional: true, Computed: true,
+				PlanModifiers: append([]planmodifier.String{keepStateWhenUnsetString{}}, replaceIfSetString()...),
+				Description:   "Defaults to app_owner. Changing this replaces the database."},
+			"database_name": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: keepThenReplace,
+				Description: "Defaults to app. Changing this replaces the database."},
+			"backup_retention_days": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
+				Description: "7 to 35; 7 when left out. Changes in place."},
 			"deletion_protection": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
 				Description: "While true, the database can't be deleted. Changes in place."},
-			"maintenance_window": schema.SingleNestedAttribute{
-				Optional: true, Computed: true, PlanModifiers: []planmodifier.Object{objectplanmodifier.UseStateForUnknown()},
-				Description: "Picked at random when left out. Changes in place.",
-				Attributes: map[string]schema.Attribute{
-					"day_of_week":  schema.Int64Attribute{Required: true, Description: "0 (Sunday) to 6."},
-					"start_minute": schema.Int64Attribute{Required: true, Description: "Minutes after midnight UTC, 0 to 1439."},
-				},
+			"maintenance_window": schema.ObjectAttribute{
+				Optional: true, Computed: true, AttributeTypes: maintenanceWindowType.AttrTypes,
+				PlanModifiers: []planmodifier.Object{objectplanmodifier.UseStateForUnknown()},
+				Description:   "{ day_of_week = 0 (Sunday) to 6, start_minute = minutes after midnight UTC, 0 to 1439 }. Picked at random when left out. Changes in place.",
 			},
 			"billing": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("monthly"),
-				PlanModifiers: replaceString(), Description: "monthly, yearly or hourly."},
+				Description: "monthly, yearly or hourly. Changes in place; a switch between prepaid periods takes effect at the next renewal."},
 			"standby": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("off"),
 				Description: "off, sync or async. Changes in place."},
 			"on_standby_loss": schema.StringAttribute{Optional: true, Computed: true, Default: stringdefault.StaticString("degrade"),
@@ -159,6 +191,18 @@ func (r *dedicatedDatabaseResource) Schema(_ context.Context, _ resource.SchemaR
 			"billing_status": schema.StringAttribute{Computed: true},
 			"checkout_url": schema.StringAttribute{Computed: true, PlanModifiers: keepString,
 				Description: "Where the owner pays while status is pending_payment."},
+			"restore_from": schema.SingleNestedAttribute{
+				Optional:      true,
+				PlanModifiers: []planmodifier.Object{objectplanmodifier.RequiresReplace()},
+				Description:   "Creates the database as a restore of another Dedicated database instead of an empty one. The source isn't changed. Engine, version, user, database name, backup retention and storage limit are taken from the source. Changing or removing this replaces the database; to keep the database after it exists, remove the block and add lifecycle { ignore_changes = [restore_from] }.",
+				Attributes: map[string]schema.Attribute{
+					"source_database_id": schema.StringAttribute{Required: true, Description: "The Dedicated database to restore from."},
+					"target_time": schema.StringAttribute{Optional: true,
+						Description: "Restore to this moment, as an RFC 3339 time inside the source's restorable window. Use this or backup_id."},
+					"backup_id":   schema.StringAttribute{Optional: true, Description: "Restore from this backup of the source. Use this or target_time."},
+					"from_mirror": schema.BoolAttribute{Optional: true, Description: "Read the restore from the second backup copy."},
+				},
+			},
 		},
 	}
 }
@@ -181,6 +225,38 @@ func (r *dedicatedDatabaseResource) ValidateConfig(ctx context.Context, req reso
 	if !retention.IsNull() && !retention.IsUnknown() && (retention.ValueInt64() < 7 || retention.ValueInt64() > 35) {
 		resp.Diagnostics.AddAttributeError(path.Root("backup_retention_days"), "Unsupported value", "Keep backups for 7 to 35 days.")
 	}
+	var engine, version types.String
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("engine"), &engine)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("version"), &version)...)
+	if !engine.IsNull() && !engine.IsUnknown() && dedicatedEngineVersions[engine.ValueString()] == nil {
+		resp.Diagnostics.AddAttributeError(path.Root("engine"), "Unsupported value", "Use postgres or mysql.")
+	} else if !engine.IsUnknown() && !version.IsNull() && !version.IsUnknown() {
+		name := "postgres"
+		if !engine.IsNull() {
+			name = engine.ValueString()
+		}
+		if !containsString(dedicatedEngineVersions[name], version.ValueString()) {
+			resp.Diagnostics.AddAttributeError(path.Root("version"), "Unsupported value", fmt.Sprintf("%s supports versions %v.", name, dedicatedEngineVersions[name]))
+		}
+	}
+	var restore types.Object
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("restore_from"), &restore)...)
+	if restore.IsNull() || restore.IsUnknown() {
+		return
+	}
+	var source dedicatedRestoreFromModel
+	resp.Diagnostics.Append(restore.As(ctx, &source, basetypes.ObjectAsOptions{})...)
+	if resp.Diagnostics.HasError() || source.TargetTime.IsUnknown() || source.BackupID.IsUnknown() {
+		return
+	}
+	if source.TargetTime.IsNull() == source.BackupID.IsNull() {
+		resp.Diagnostics.AddAttributeError(path.Root("restore_from"), "Choose what to restore from", "Set exactly one of target_time or backup_id in restore_from.")
+	}
+	if !source.TargetTime.IsNull() {
+		if _, err := time.Parse(time.RFC3339, source.TargetTime.ValueString()); err != nil {
+			resp.Diagnostics.AddAttributeError(path.Root("restore_from").AtName("target_time"), "Invalid time", "Use an RFC 3339 time such as 2026-10-25T14:30:00Z.")
+		}
+	}
 }
 
 func containsString(values []string, value string) bool {
@@ -198,18 +274,10 @@ func (r *dedicatedDatabaseResource) Create(ctx context.Context, req resource.Cre
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	request := client.CreateDedicatedDatabaseRequest{
-		Name: plan.Name.ValueString(), Version: plan.Version.ValueString(), InstanceClass: plan.InstanceClass.ValueString(),
-		StorageGB: plan.StorageGB.ValueInt64(), StorageMaxGB: plan.StorageMaxGB.ValueInt64(),
-		MasterUsername: plan.MasterUsername.ValueString(), DatabaseName: plan.DatabaseName.ValueString(),
-		BackupRetentionDays: plan.BackupRetentionDays.ValueInt64(), DeletionProtection: plan.DeletionProtection.ValueBool(),
-		Billing: plan.Billing.ValueString(), Standby: plan.Standby.ValueString(), OnStandbyLoss: plan.OnStandbyLoss.ValueString(),
-	}
-	request.MaintenanceWindow = plan.maintenanceWindow(ctx, &resp.Diagnostics)
+	result, err := r.createOrRestore(ctx, &plan, &resp.Diagnostics)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	result, err := r.client.CreateDedicatedDatabase(ctx, plan.ProjectID.ValueString(), request)
 	apiErr, _ := client.AsDedicatedError(err)
 	pendingPayment := apiErr != nil && apiErr.PaymentRequired() && result.Database != nil && result.Database.ID != ""
 	if err != nil && !pendingPayment {
@@ -236,6 +304,78 @@ func (r *dedicatedDatabaseResource) Create(ctx context.Context, req resource.Cre
 	}
 	plan.resolveUnknown()
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+func (r *dedicatedDatabaseResource) createOrRestore(ctx context.Context, plan *dedicatedDatabaseModel, diags *diag.Diagnostics) (*client.DedicatedCreateResult, error) {
+	if plan.RestoreFrom.IsNull() || plan.RestoreFrom.IsUnknown() {
+		engine := plannedString(plan.Engine)
+		if engine == "" {
+			engine = "postgres"
+		}
+		request := client.CreateDedicatedDatabaseRequest{
+			Type: engine, Name: plan.Name.ValueString(), Version: plannedString(plan.Version), InstanceClass: plan.InstanceClass.ValueString(),
+			StorageGB: plan.StorageGB.ValueInt64(), StorageMaxGB: plannedInt64(plan.StorageMaxGB),
+			MasterUsername: plannedString(plan.MasterUsername), DatabaseName: plannedString(plan.DatabaseName),
+			BackupRetentionDays: plannedInt64(plan.BackupRetentionDays), DeletionProtection: plan.DeletionProtection.ValueBool(),
+			Billing: plan.Billing.ValueString(), Standby: plan.Standby.ValueString(), OnStandbyLoss: plan.OnStandbyLoss.ValueString(),
+		}
+		request.MaintenanceWindow = plan.maintenanceWindow(ctx, diags)
+		if diags.HasError() {
+			return nil, nil
+		}
+		return r.client.CreateDedicatedDatabase(ctx, plannedString(plan.ProjectID), request)
+	}
+	var source dedicatedRestoreFromModel
+	diags.Append(plan.RestoreFrom.As(ctx, &source, basetypes.ObjectAsOptions{})...)
+	if conflicts := plan.restoreConflicts(); len(conflicts) > 0 {
+		diags.AddError("These settings come from the source database",
+			fmt.Sprintf("%s can't be set while restoring. Remove them, create the restore, then set them in a later apply.", strings.Join(conflicts, ", ")))
+	}
+	if diags.HasError() {
+		return nil, nil
+	}
+	return r.client.RestoreDedicatedDatabase(ctx, source.SourceDatabaseID.ValueString(), client.RestoreDedicatedDatabaseRequest{
+		Name: plan.Name.ValueString(), TargetTime: plannedString(source.TargetTime), BackupID: plannedString(source.BackupID),
+		InstanceClass: plan.InstanceClass.ValueString(), StorageGB: plan.StorageGB.ValueInt64(), FromMirror: source.FromMirror.ValueBool(),
+		Billing: plan.Billing.ValueString(),
+	})
+}
+
+func (m *dedicatedDatabaseModel) restoreConflicts() []string {
+	var conflicts []string
+	for name, value := range map[string]attr.Value{
+		"engine": m.Engine, "version": m.Version, "master_username": m.MasterUsername, "database_name": m.DatabaseName,
+		"backup_retention_days": m.BackupRetentionDays, "storage_max_gb": m.StorageMaxGB, "maintenance_window": m.MaintenanceWindow,
+	} {
+		if !value.IsNull() && !value.IsUnknown() {
+			conflicts = append(conflicts, name)
+		}
+	}
+	if m.DeletionProtection.ValueBool() {
+		conflicts = append(conflicts, "deletion_protection")
+	}
+	if m.Standby.ValueString() != "off" {
+		conflicts = append(conflicts, "standby")
+	}
+	if m.OnStandbyLoss.ValueString() != "degrade" {
+		conflicts = append(conflicts, "on_standby_loss")
+	}
+	sort.Strings(conflicts)
+	return conflicts
+}
+
+func plannedString(value types.String) string {
+	if value.IsNull() || value.IsUnknown() {
+		return ""
+	}
+	return value.ValueString()
+}
+
+func plannedInt64(value types.Int64) int64 {
+	if value.IsNull() || value.IsUnknown() {
+		return 0
+	}
+	return value.ValueInt64()
 }
 
 func (r *dedicatedDatabaseResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -265,6 +405,9 @@ func (r *dedicatedDatabaseResource) Read(ctx context.Context, req resource.ReadR
 	billing, err := r.client.GetDedicatedBilling(ctx, state.ID.ValueString())
 	if err == nil {
 		state.BillingStatus = nonEmptyString(billing.Status)
+		if billing.NextBilling != nil && billing.NextBilling.Mode != "" {
+			state.Billing = types.StringValue(billing.NextBilling.Mode)
+		}
 	} else if apiErr, ok := client.AsDedicatedError(err); !notFound(err) && !(ok && apiErr.StatusCode == http.StatusServiceUnavailable) {
 		resp.Diagnostics.AddError("Read StackShift dedicated database billing failed", dedicatedErrorDetail(err))
 		return
@@ -289,6 +432,7 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 	working.InstanceClass, working.StorageGB, working.StorageMaxGB = state.InstanceClass, state.StorageGB, state.StorageMaxGB
 	working.Standby, working.OnStandbyLoss = state.Standby, state.OnStandbyLoss
 	working.BackupRetentionDays, working.DeletionProtection, working.MaintenanceWindow = state.BackupRetentionDays, state.DeletionProtection, state.MaintenanceWindow
+	working.Name, working.Billing = state.Name, state.Billing
 	working.Status, working.BillingStatus, working.AllocatedStorageGB = state.Status, state.BillingStatus, state.AllocatedStorageGB
 	working.resolveUnknown()
 	id := plan.ID.ValueString()
@@ -296,6 +440,9 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 	save := func() { resp.Diagnostics.Append(resp.State.Set(ctx, &working)...) }
 
 	settings := map[string]any{}
+	if !plan.Name.Equal(state.Name) {
+		settings["name"] = plan.Name.ValueString()
+	}
 	if !plan.BackupRetentionDays.Equal(state.BackupRetentionDays) {
 		settings["backup_retention_days"] = plan.BackupRetentionDays.ValueInt64()
 	}
@@ -313,6 +460,7 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 			save()
 			return
 		}
+		working.Name = plan.Name
 		working.BackupRetentionDays, working.DeletionProtection, working.MaintenanceWindow = plan.BackupRetentionDays, plan.DeletionProtection, plan.MaintenanceWindow
 	}
 
@@ -354,6 +502,16 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 		working.InstanceClass = plan.InstanceClass
 	}
 
+	if !plan.Billing.Equal(state.Billing) {
+		if !paidChange(&resp.Diagnostics, "billing change", accept, func(confirm *int64) error {
+			return r.client.SetDedicatedBilling(ctx, id, plan.Billing.ValueString(), confirm)
+		}) {
+			save()
+			return
+		}
+		working.Billing = plan.Billing
+	}
+
 	if db, err := r.client.GetDedicatedDatabase(ctx, id); err == nil {
 		working.Status = types.StringValue(db.Status)
 		if db.Dedicated != nil {
@@ -387,6 +545,7 @@ func (m *dedicatedDatabaseModel) applyDatabase(ctx context.Context, db *client.D
 		m.ProjectID = types.StringValue(*db.ProjectID)
 	}
 	m.Name = firstKnownString(db.Name, m.Name)
+	m.Engine = firstKnownString(db.Type, m.Engine)
 	m.Version = firstKnownString(db.Version, m.Version)
 	m.DatabaseName = firstKnownString(db.DatabaseName, m.DatabaseName)
 	m.MasterUsername = firstKnownString(db.Username, m.MasterUsername)
@@ -455,7 +614,8 @@ func (m *dedicatedDatabaseModel) applyHA(ha *client.DedicatedHA, diags *diag.Dia
 }
 
 func (m *dedicatedDatabaseModel) resolveUnknown() {
-	for _, value := range []*types.String{&m.MasterPassword, &m.Host, &m.CheckoutURL, &m.Status, &m.BillingStatus} {
+	for _, value := range []*types.String{&m.MasterPassword, &m.Host, &m.CheckoutURL, &m.Status, &m.BillingStatus,
+		&m.ProjectID, &m.Engine, &m.Version, &m.MasterUsername, &m.DatabaseName} {
 		if value.IsUnknown() {
 			*value = types.StringNull()
 		}
@@ -465,6 +625,9 @@ func (m *dedicatedDatabaseModel) resolveUnknown() {
 	}
 	if m.StorageMaxGB.IsUnknown() {
 		m.StorageMaxGB = types.Int64Null()
+	}
+	if m.BackupRetentionDays.IsUnknown() {
+		m.BackupRetentionDays = types.Int64Null()
 	}
 	if m.MaintenanceWindow.IsUnknown() {
 		m.MaintenanceWindow = types.ObjectNull(maintenanceWindowType.AttrTypes)

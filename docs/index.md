@@ -11,6 +11,7 @@ Terraform loads the provider binary, reads the provider configuration, and creat
 - `stackshift_project` calls `/api/v1/projects`
 - `stackshift_project_env` calls `/api/v1/projects/{projectID}/env`
 - `stackshift_database` calls `/api/v1/projects/{projectID}/databases` and `/api/v1/databases/{databaseID}`
+- `stackshift_dedicated_database` and its companion resources (`_replica`, `_parameter_group_attachment`, `_snapshot`, `_restore_point`, `_restore_schedule`, `_public_access`, `_insights`) plus `stackshift_database_parameter_group` manage Dedicated PostgreSQL and MySQL databases through `/api/v1/databases`
 - `stackshift_domain` calls `/api/v1/projects/{projectID}/domains`
 - `stackshift_dns_record` calls `/api/v1/domains/{domainID}/dns`
 - `stackshift_build_action` and `stackshift_deployment_action` trigger explicit operational actions
