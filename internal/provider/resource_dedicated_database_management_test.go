@@ -864,6 +864,12 @@ func TestDedicatedDatabaseModifyPlanGuardsReplacementAndWarnsAboutRestoreFrom(t 
 		t.Fatalf("diagnostics = %v", allowed.Diagnostics)
 	}
 
+	unknownVersion := dedicatedModelFixture()
+	unknownVersion.Version = types.StringUnknown()
+	if pending := modifyDedicatedPlan(t, state, unknownVersion, unknownVersion); len(pending.Diagnostics.Errors()) != 1 {
+		t.Fatalf("a version known only at apply may replace the database, diagnostics = %v", pending.Diagnostics)
+	}
+
 	restore := dedicatedModelFixture()
 	restore.RestoreFrom = types.ObjectValueMust(restoreFromAttributeTypes, map[string]attr.Value{
 		"source_database_id": types.StringValue("src-1"), "target_time": types.StringValue("2026-10-25T14:30:00Z"),

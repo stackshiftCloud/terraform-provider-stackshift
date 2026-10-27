@@ -243,9 +243,9 @@ func (r *dedicatedDatabaseResource) ModifyPlan(ctx context.Context, req resource
 	}
 	if !plan.AllowReplace.ValueBool() {
 		for name, values := range map[string][2]types.String{"engine": {plan.Engine, state.Engine}, "version": {plan.Version, state.Version}} {
-			if !values[0].IsNull() && !values[0].IsUnknown() && !values[0].Equal(values[1]) {
+			if values[0].IsUnknown() || !values[0].IsNull() && !values[0].Equal(values[1]) {
 				resp.Diagnostics.AddAttributeError(path.Root(name), "This would delete the database",
-					"Changing engine or version replaces the database and deletes its data. Set allow_replace = true to go ahead, or move the data with restore_from into a new resource instead.")
+					"Changing engine or version, or setting it from a value Terraform only knows during apply, replaces the database and deletes its data. Set allow_replace = true to go ahead, or move the data with restore_from into a new resource instead.")
 			}
 		}
 	}
