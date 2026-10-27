@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -97,6 +98,7 @@ type dedicatedDatabaseModel struct {
 	BillingStatus       types.String   `tfsdk:"billing_status"`
 	CheckoutURL         types.String   `tfsdk:"checkout_url"`
 	RestoreFrom         types.Object   `tfsdk:"restore_from"`
+	AllowReplace        types.Bool     `tfsdk:"allow_replace"`
 	Timeouts            timeouts.Value `tfsdk:"timeouts"`
 }
 
@@ -222,6 +224,8 @@ func (r *dedicatedDatabaseResource) Schema(ctx context.Context, _ resource.Schem
 					"from_mirror": schema.BoolAttribute{Optional: true, Description: "Read the restore from the second backup copy."},
 				},
 			},
+			"allow_replace": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
+				Description: "Changing engine or version replaces the database and deletes its data, so Terraform refuses unless this is true. Never sent to StackShift."},
 			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{Create: true, Update: true, Delete: true}),
 		},
 	}
@@ -234,6 +238,23 @@ func (r *dedicatedDatabaseResource) ModifyPlan(ctx context.Context, req resource
 	var plan, state dedicatedDatabaseModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !plan.AllowReplace.ValueBool() {
+		for name, values := range map[string][2]types.String{"engine": {plan.Engine, state.Engine}, "version": {plan.Version, state.Version}} {
+			if !values[0].IsNull() && !values[0].IsUnknown() && !values[0].Equal(values[1]) {
+				resp.Diagnostics.AddAttributeError(path.Root(name), "This would delete the database",
+					"Changing engine or version replaces the database and deletes its data. Set allow_replace = true to go ahead, or move the data with restore_from into a new resource instead.")
+			}
+		}
+	}
+	var configured types.Object
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("restore_from"), &configured)...)
+	if !configured.IsNull() && state.RestoreFrom.IsNull() {
+		resp.Diagnostics.AddAttributeWarning(path.Root("restore_from"), "restore_from does nothing here",
+			"restore_from only matters when a database is created, so adding it to a database that already exists changes nothing.")
+	}
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -264,16 +285,24 @@ func (r *dedicatedDatabaseResource) ValidateConfig(ctx context.Context, req reso
 		resp.Diagnostics.AddAttributeError(path.Root("backup_retention_days"), "Unsupported value", "Keep backups for 7 to 35 days.")
 	}
 	validateUnpaddedName(ctx, req.Config, "name", &resp.Diagnostics)
+	var engine, version types.String
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("engine"), &engine)...)
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("version"), &version)...)
+	if !engine.IsNull() && !engine.IsUnknown() && engine.ValueString() != "postgres" && engine.ValueString() != "mysql" {
+		resp.Diagnostics.AddAttributeError(path.Root("engine"), "Unsupported value", "Use postgres or mysql.")
+	}
+	if !version.IsNull() && !version.IsUnknown() && !versionPattern.MatchString(version.ValueString()) {
+		resp.Diagnostics.AddAttributeError(path.Root("version"), "Unsupported value", "Use a version number such as 17 or 8.4.")
+	}
 	var window types.Object
 	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("maintenance_window"), &window)...)
 	if !window.IsNull() && !window.IsUnknown() {
 		var parsed dedicatedMaintenanceWindowModel
-		resp.Diagnostics.Append(window.As(ctx, &parsed, basetypes.ObjectAsOptions{})...)
-		if !resp.Diagnostics.HasError() && !parsed.DayOfWeek.IsUnknown() && (parsed.DayOfWeek.ValueInt64() < 0 || parsed.DayOfWeek.ValueInt64() > 6) {
-			resp.Diagnostics.AddAttributeError(path.Root("maintenance_window"), "Unsupported value", "day_of_week is 0 (Sunday) to 6.")
-		}
-		if !resp.Diagnostics.HasError() && !parsed.StartMinute.IsUnknown() && (parsed.StartMinute.ValueInt64() < 0 || parsed.StartMinute.ValueInt64() > 1439) {
-			resp.Diagnostics.AddAttributeError(path.Root("maintenance_window"), "Unsupported value", "start_minute is minutes after midnight UTC, 0 to 1439.")
+		if asDiags := window.As(ctx, &parsed, basetypes.ObjectAsOptions{}); asDiags.HasError() {
+			resp.Diagnostics.Append(asDiags...)
+		} else {
+			validateWindowValue(&resp.Diagnostics, "day_of_week", parsed.DayOfWeek, 0, 6, "day_of_week is 0 (Sunday) to 6.")
+			validateWindowValue(&resp.Diagnostics, "start_minute", parsed.StartMinute, 0, 1439, "start_minute is minutes after midnight UTC, 0 to 1439.")
 		}
 	}
 	var restore types.Object
@@ -282,19 +311,39 @@ func (r *dedicatedDatabaseResource) ValidateConfig(ctx context.Context, req reso
 		return
 	}
 	var source dedicatedRestoreFromModel
-	resp.Diagnostics.Append(restore.As(ctx, &source, basetypes.ObjectAsOptions{})...)
-	if resp.Diagnostics.HasError() || source.TargetTime.IsUnknown() || source.BackupID.IsUnknown() {
+	if asDiags := restore.As(ctx, &source, basetypes.ObjectAsOptions{}); asDiags.HasError() {
+		resp.Diagnostics.Append(asDiags...)
+		return
+	}
+	for name, value := range map[string]types.String{"target_time": source.TargetTime, "backup_id": source.BackupID} {
+		if !value.IsNull() && !value.IsUnknown() && value.ValueString() == "" {
+			resp.Diagnostics.AddAttributeError(path.Root("restore_from").AtName(name), "Value is empty", name+" can't be an empty string. Leave it out or give it a value.")
+		}
+	}
+	if source.TargetTime.IsUnknown() || source.BackupID.IsUnknown() {
 		return
 	}
 	if source.TargetTime.IsNull() == source.BackupID.IsNull() {
 		resp.Diagnostics.AddAttributeError(path.Root("restore_from"), "Choose what to restore from", "Set exactly one of target_time or backup_id in restore_from, with a value. If you pass the value in from another resource or data source, check that it isn't empty, for example that the source database already has backups.")
 	}
-	if !source.TargetTime.IsNull() {
+	if !source.TargetTime.IsNull() && source.TargetTime.ValueString() != "" {
 		if _, err := time.Parse(time.RFC3339, source.TargetTime.ValueString()); err != nil {
 			resp.Diagnostics.AddAttributeError(path.Root("restore_from").AtName("target_time"), "Invalid time", "Use an RFC 3339 time such as 2026-10-25T14:30:00Z.")
 		}
 	}
 }
+
+func validateWindowValue(diags *diag.Diagnostics, name string, value types.Int64, low, high int64, message string) {
+	switch {
+	case value.IsUnknown():
+	case value.IsNull():
+		diags.AddAttributeError(path.Root("maintenance_window"), "Missing value", name+" is required in maintenance_window.")
+	case value.ValueInt64() < low || value.ValueInt64() > high:
+		diags.AddAttributeError(path.Root("maintenance_window"), "Unsupported value", message)
+	}
+}
+
+var versionPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?$`)
 
 func containsString(values []string, value string) bool {
 	for _, candidate := range values {
@@ -345,6 +394,18 @@ func (r *dedicatedDatabaseResource) Create(ctx context.Context, req resource.Cre
 			fmt.Sprintf("The database %s was created and is waiting for payment. The account owner pays here: %s\n\n"+
 				"It is kept in Terraform state with status pending_payment and is removed if it isn't paid within 24 hours. "+
 				"After paying, run terraform apply again to pick up the running database.", plan.ID.ValueString(), checkoutURL))
+	}
+	plan.resolveUnknown()
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	if pendingPayment || resp.Diagnostics.HasError() {
+		return
+	}
+	if err := waitDedicatedRunning(ctx, r.client, plan.ID.ValueString(), createTimeout); err != nil {
+		resp.Diagnostics.AddError("StackShift dedicated database didn't start", dedicatedErrorDetail(err))
+		return
+	}
+	if db, err := r.client.GetDedicatedDatabase(ctx, plan.ID.ValueString()); err == nil {
+		plan.applyDatabase(ctx, db, &resp.Diagnostics)
 	}
 	plan.resolveUnknown()
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -567,6 +628,13 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 		working.Billing = plan.Billing
 	}
 
+	if db, err := r.client.GetDedicatedDatabase(ctx, id); err == nil && dedicatedTransitional(db.Status) {
+		if err := waitDedicatedRunning(ctx, r.client, id, updateTimeout); err != nil {
+			resp.Diagnostics.AddError("StackShift dedicated database didn't finish the change", dedicatedErrorDetail(err))
+			save()
+			return
+		}
+	}
 	if db, err := r.client.GetDedicatedDatabase(ctx, id); err == nil {
 		working.Status = types.StringValue(db.Status)
 		if db.Dedicated != nil {
@@ -612,6 +680,7 @@ func (r *dedicatedDatabaseResource) ImportState(ctx context.Context, req resourc
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("apply_changes"), "window")...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("accept_price_changes"), false)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("skip_final_snapshot"), false)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("allow_replace"), false)...)
 }
 
 func (m *dedicatedDatabaseModel) applyDatabase(ctx context.Context, db *client.DedicatedDatabase, diags *diag.Diagnostics) {

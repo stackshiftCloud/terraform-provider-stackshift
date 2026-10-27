@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -24,13 +25,14 @@ func NewDedicatedDatabaseSnapshotResource() resource.Resource {
 type dedicatedDatabaseSnapshotResource struct{ client *client.Client }
 
 type dedicatedDatabaseSnapshotModel struct {
-	ID         types.String `tfsdk:"id"`
-	DatabaseID types.String `tfsdk:"database_id"`
-	Name       types.String `tfsdk:"name"`
-	Kind       types.String `tfsdk:"kind"`
-	Status     types.String `tfsdk:"status"`
-	SizeBytes  types.Int64  `tfsdk:"size_bytes"`
-	CreatedAt  types.String `tfsdk:"created_at"`
+	ID         types.String   `tfsdk:"id"`
+	DatabaseID types.String   `tfsdk:"database_id"`
+	Name       types.String   `tfsdk:"name"`
+	Kind       types.String   `tfsdk:"kind"`
+	Status     types.String   `tfsdk:"status"`
+	SizeBytes  types.Int64    `tfsdk:"size_bytes"`
+	CreatedAt  types.String   `tfsdk:"created_at"`
+	Timeouts   timeouts.Value `tfsdk:"timeouts"`
 }
 
 func (r *dedicatedDatabaseSnapshotResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -43,7 +45,7 @@ func (r *dedicatedDatabaseSnapshotResource) Configure(_ context.Context, req res
 	}
 }
 
-func (r *dedicatedDatabaseSnapshotResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *dedicatedDatabaseSnapshotResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	keep := []planmodifier.String{stringplanmodifier.UseStateForUnknown()}
 	resp.Schema = schema.Schema{
 		Description: "A snapshot of a Dedicated database that is kept until you delete it. The database must be running. Use its id as restore_from.backup_id to restore it into a new database.",
@@ -55,6 +57,7 @@ func (r *dedicatedDatabaseSnapshotResource) Schema(_ context.Context, _ resource
 			"status":      schema.StringAttribute{Computed: true},
 			"size_bytes":  schema.Int64Attribute{Computed: true},
 			"created_at":  schema.StringAttribute{Computed: true, PlanModifiers: keep},
+			"timeouts":    timeouts.Attributes(ctx, timeouts.Opts{Create: true, Delete: true}),
 		},
 	}
 }
@@ -69,8 +72,13 @@ func (r *dedicatedDatabaseSnapshotResource) Create(ctx context.Context, req reso
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	createTimeout, timeoutDiags := plan.Timeouts.Create(ctx, dedicatedWaitLimit)
+	resp.Diagnostics.Append(timeoutDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	databaseID := plan.DatabaseID.ValueString()
-	if err := waitDedicatedRunning(ctx, r.client, databaseID, dedicatedWaitLimit); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, databaseID, createTimeout); err != nil {
 		resp.Diagnostics.AddError("The database isn't ready for a snapshot", dedicatedErrorDetail(err))
 		return
 	}
@@ -81,7 +89,7 @@ func (r *dedicatedDatabaseSnapshotResource) Create(ctx context.Context, req reso
 	}
 	plan.apply(snapshot)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	err = pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
+	err = pollDedicated(ctx, createTimeout, func(ctx context.Context) (bool, error) {
 		current, err := r.client.GetDedicatedSnapshot(ctx, databaseID, snapshot.ID)
 		if err != nil {
 			return false, err
@@ -136,12 +144,17 @@ func (r *dedicatedDatabaseSnapshotResource) Delete(ctx context.Context, req reso
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	deleteTimeout, timeoutDiags := state.Timeouts.Delete(ctx, dedicatedWaitLimit)
+	resp.Diagnostics.Append(timeoutDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	databaseID, id := state.DatabaseID.ValueString(), state.ID.ValueString()
 	if err := r.client.DeleteDedicatedSnapshot(ctx, databaseID, id); err != nil {
 		resp.Diagnostics.AddError("Delete StackShift snapshot failed", dedicatedErrorDetail(err))
 		return
 	}
-	err := pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
+	err := pollDedicated(ctx, deleteTimeout, func(ctx context.Context) (bool, error) {
 		_, err := r.client.GetDedicatedSnapshot(ctx, databaseID, id)
 		if notFound(err) {
 			return true, nil

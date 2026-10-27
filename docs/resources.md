@@ -385,8 +385,9 @@ The master password is returned only once, when the database is created. It is s
 | `instance_class` | yes | A slug from `stackshift_database_instance_classes`. Changes in place. |
 | `storage_gb` | yes | 10 to 1024. Grows in place; it can't shrink. When autogrow raises the size above this value, Terraform doesn't treat it as drift; read the real size from `allocated_storage_gb`. A value below the current size is recorded without a change, since storage can't shrink. |
 | `storage_max_gb` | no | Autogrow limit. The server default is twice `storage_gb`, up to 1024. Changes in place. |
-| `engine` | no | `postgres` (default) or `mysql`. Changes replace the database. Other values are rejected by StackShift when you apply. |
-| `version` | no | PostgreSQL `15` to `18` (default `17`) or MySQL `8.4` (default `8.4`). StackShift rejects versions it doesn't offer when you apply. Changes replace the database. |
+| `engine` | no | `postgres` (default) or `mysql`. **Changing it replaces the database and deletes its data.** |
+| `version` | no | A version number such as `17` or `8.4`. PostgreSQL `15` to `18` (default `17`) or MySQL `8.4` (default). StackShift rejects versions it doesn't offer when you apply. **Changing it replaces the database and deletes its data.** |
+| `allow_replace` | no | Defaults to `false`. Terraform refuses to plan a change to `engine` or `version` unless this is `true`, because the change deletes the database and creates an empty one. To move the data, restore it into a new resource with `restore_from` instead. Only Terraform uses it; it is never sent to StackShift. Import sets it to `false`. |
 | `project_id` | no | Owning project. Changes replace the database. |
 | `master_username` | no | Defaults to `app_owner`. Changes replace the database. MySQL user names are at most 32 characters. |
 | `database_name` | no | Defaults to `app`. Changes replace the database. |
@@ -436,20 +437,25 @@ Size changes, standby changes, storage growth and a switch away from hourly bill
 | `backup_id` | one of the two | Restore from this backup or snapshot of the source. |
 | `from_mirror` | no | Read the restore from the second backup copy. |
 
-Use `stackshift_dedicated_database_backups` to see the restorable window and the backup ids. `instance_class` and `storage_gb` are required as usual; `storage_gb` can't be below the source's. The engine, version, `master_username`, `database_name`, `backup_retention_days`, `storage_max_gb` and the maintenance window come from the source, so setting them (or `deletion_protection = true`, `standby` or `on_standby_loss`) together with `restore_from` stops the apply before anything is created. Set them in a later apply once the database exists.
+The source has to be a database that already exists and has backups; a database created in the same apply has no restorable point yet. Use `stackshift_dedicated_database_backups` to see the restorable window and the backup ids. `instance_class` and `storage_gb` are required as usual; `storage_gb` can't be below the source's. The engine, version, `master_username`, `database_name`, `backup_retention_days`, `storage_max_gb` and the maintenance window come from the source, so setting them (or `deletion_protection = true`, `standby` or `on_standby_loss`) together with `restore_from` stops the apply before anything is created. Set them in a later apply once the database exists.
 
-`restore_from` is create-only. It only matters when the database is created: once the database exists, changing or removing it changes nothing and never shows a difference in the plan. An imported database doesn't have a `restore_from` recorded, so the first apply after importing a database that has it in its configuration records it without touching the database.
+`restore_from` is create-only. It only matters when the database is created: once the database exists, changing or removing it changes nothing and never shows a difference in the plan. Adding it to a database that already exists also changes nothing; the plan shows a warning and the first apply just records the block. The same happens after importing a database that has it in its configuration.
 
 The target has to be given explicitly, either as a literal time or as a snapshot id, and it has to lie inside the source's restorable window. If the value you pass in is empty when the apply runs (for example the source has no backups yet), the apply stops before anything is created.
 
 ```hcl
+variable "source_database_id" {
+  description = "An existing Dedicated database that already has backups."
+  type        = string
+}
+
 resource "stackshift_dedicated_database" "orders_before_incident" {
   name           = "orders-before-incident"
   instance_class = "s-2vcpu-4gb"
   storage_gb     = 20
 
   restore_from = {
-    source_database_id = stackshift_dedicated_database.orders.id
+    source_database_id = var.source_database_id
     target_time        = "2026-10-25T14:30:00Z"
   }
 }
@@ -465,7 +471,7 @@ Import reads the settings back from the API and sets `apply_changes`, `accept_pr
 
 ### Timeouts
 
-`timeouts = { create = "45m", update = "45m", delete = "45m" }` sets how long Terraform works on the database before giving up; each defaults to 45 minutes. Deleting waits until the database is gone.
+`timeouts = { create = "45m", update = "45m", delete = "45m" }` sets how long Terraform works on the database before giving up; each defaults to 45 minutes. Creating and updating wait until the database is running, except a new database that is waiting for payment, which stays pending and doesn't wait. Deleting waits until the database is gone.
 
 ## `stackshift_dedicated_database_replica`
 
@@ -479,7 +485,7 @@ Adds a read replica to a Dedicated database through `POST /databases/{id}/replic
 | `instance_class` | no | Defaults to the database's size. |
 | `accept_price_changes` | no | Defaults to `false`. |
 
-Computed attributes: `id`, `status` and `site`.
+Computed attributes: `id`, `status` and `site`. `timeouts = { create = "45m", delete = "45m" }` sets how long Terraform works on adding or removing the replica.
 
 ### Import
 
@@ -533,7 +539,7 @@ Attaches a parameter group to a Dedicated database through `PUT /databases/{id}/
 | `restart_to_apply` | no | Defaults to `false`. When `true`, the database restarts right after the group is attached or switched, so settings that need a restart take effect. Connections drop briefly. |
 | `timeouts` | no | `create` and `update` durations. |
 
-Computed attributes: `id` (the database id), `applied` (whether the database runs with the group's settings) and `pending_restart` (settings waiting for a restart). With `restart_to_apply = true` the apply waits until the database has restarted and every setting is applied. `timeouts = { create = "45m", update = "45m" }` sets how long it waits.
+Computed attributes: `id` (the database id), `applied` (whether the database runs with the group's settings) and `pending_restart` (settings waiting for a restart). With `restart_to_apply = true` the apply waits until the database has restarted and every setting is applied. Turning it on for an attachment that already exists restarts the database the same way. `timeouts = { create = "45m", update = "45m" }` sets how long it waits.
 
 ### Import
 
@@ -552,7 +558,7 @@ A snapshot of a Dedicated database that is kept until you delete it, through `/d
 | `database_id` | yes | The Dedicated database. Changes replace the snapshot. |
 | `name` | no | Up to 100 characters. Changes replace the snapshot. |
 
-Computed attributes: `id`, `kind`, `status`, `size_bytes` and `created_at`.
+Computed attributes: `id`, `kind`, `status`, `size_bytes` and `created_at`. `timeouts = { create = "45m", delete = "45m" }` sets how long the apply waits for the snapshot to be ready and to be gone.
 
 ### Import
 
@@ -571,7 +577,7 @@ A fast restore point of a Dedicated database, taken on demand through `/database
 | `database_id` | yes | The Dedicated database. Changes replace the restore point. |
 | `name` | no | Up to 100 characters. Changes replace the restore point. |
 
-Computed attributes: `id`, `kind`, `status`, `size_gb` and `taken_at`.
+Computed attributes: `id`, `kind`, `status`, `size_gb` and `taken_at`. `timeouts = { create = "45m", delete = "45m" }` sets how long the apply waits for the restore point to be ready and to be gone.
 
 ### Import
 
@@ -614,7 +620,7 @@ Lets people outside StackShift reach a Dedicated database through a secure publi
 
 Destroying the resource turns off the policy it created, by id, so it never turns off a newer policy that someone else created. If that policy is already gone, destroy finishes. An imported `anywhere` policy has `acknowledge_public_exposure = true`.
 
-Computed attributes: `id`, `status`, `public_hostname` and `public_port`. Connect to `public_hostname` and `public_port` with the credentials from `stackshift_database_credentials`.
+Computed attributes: `id`, `status`, `public_hostname` and `public_port`. `timeouts = { create = "45m", delete = "45m" }` sets how long the apply waits for access to turn on and off. Connect to `public_hostname` and `public_port` with the credentials from `stackshift_database_credentials`.
 
 ### Import
 

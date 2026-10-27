@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -35,15 +36,16 @@ func NewDedicatedDatabasePublicAccessResource() resource.Resource {
 type dedicatedDatabasePublicAccessResource struct{ client *client.Client }
 
 type dedicatedDatabasePublicAccessModel struct {
-	ID                        types.String `tfsdk:"id"`
-	DatabaseID                types.String `tfsdk:"database_id"`
-	AccessMode                types.String `tfsdk:"access_mode"`
-	AllowedCIDRs              types.Set    `tfsdk:"allowed_cidrs"`
-	ExpiresAt                 types.String `tfsdk:"expires_at"`
-	AcknowledgePublicExposure types.Bool   `tfsdk:"acknowledge_public_exposure"`
-	Status                    types.String `tfsdk:"status"`
-	PublicHostname            types.String `tfsdk:"public_hostname"`
-	PublicPort                types.Int64  `tfsdk:"public_port"`
+	ID                        types.String   `tfsdk:"id"`
+	DatabaseID                types.String   `tfsdk:"database_id"`
+	AccessMode                types.String   `tfsdk:"access_mode"`
+	AllowedCIDRs              types.Set      `tfsdk:"allowed_cidrs"`
+	ExpiresAt                 types.String   `tfsdk:"expires_at"`
+	AcknowledgePublicExposure types.Bool     `tfsdk:"acknowledge_public_exposure"`
+	Status                    types.String   `tfsdk:"status"`
+	PublicHostname            types.String   `tfsdk:"public_hostname"`
+	PublicPort                types.Int64    `tfsdk:"public_port"`
+	Timeouts                  timeouts.Value `tfsdk:"timeouts"`
 }
 
 func (r *dedicatedDatabasePublicAccessResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -56,7 +58,7 @@ func (r *dedicatedDatabasePublicAccessResource) Configure(_ context.Context, req
 	}
 }
 
-func (r *dedicatedDatabasePublicAccessResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *dedicatedDatabasePublicAccessResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	keep := []planmodifier.String{stringplanmodifier.UseStateForUnknown()}
 	keepThenReplace := []planmodifier.String{stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplace()}
 	resp.Schema = schema.Schema{
@@ -75,6 +77,7 @@ func (r *dedicatedDatabasePublicAccessResource) Schema(_ context.Context, _ reso
 			"status":          schema.StringAttribute{Computed: true},
 			"public_hostname": schema.StringAttribute{Computed: true, PlanModifiers: keep},
 			"public_port":     schema.Int64Attribute{Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()}},
+			"timeouts":        timeouts.Attributes(ctx, timeouts.Opts{Create: true, Delete: true}),
 		},
 	}
 }
@@ -141,8 +144,13 @@ func (r *dedicatedDatabasePublicAccessResource) Create(ctx context.Context, req 
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	createTimeout, timeoutDiags := plan.Timeouts.Create(ctx, dedicatedWaitLimit)
+	resp.Diagnostics.Append(timeoutDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	databaseID := plan.DatabaseID.ValueString()
-	if err := waitDedicatedRunning(ctx, r.client, databaseID, dedicatedWaitLimit); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, databaseID, createTimeout); err != nil {
 		resp.Diagnostics.AddError("The database isn't ready for public access", dedicatedErrorDetail(err))
 		return
 	}
@@ -164,7 +172,7 @@ func (r *dedicatedDatabasePublicAccessResource) Create(ctx context.Context, req 
 	}
 	plan.apply(ctx, policy, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	err = pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
+	err = pollDedicated(ctx, createTimeout, func(ctx context.Context) (bool, error) {
 		current, err := r.client.GetDedicatedPublicAccess(ctx, databaseID, policy.ID)
 		if err != nil {
 			return false, err
@@ -219,12 +227,17 @@ func (r *dedicatedDatabasePublicAccessResource) Delete(ctx context.Context, req 
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	deleteTimeout, timeoutDiags := state.Timeouts.Delete(ctx, dedicatedWaitLimit)
+	resp.Diagnostics.Append(timeoutDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	databaseID, id := state.DatabaseID.ValueString(), state.ID.ValueString()
 	if err := r.client.RevokeDedicatedPublicAccess(ctx, databaseID, id); err != nil {
 		resp.Diagnostics.AddError("Turn off StackShift public access failed", dedicatedErrorDetail(err))
 		return
 	}
-	err := pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
+	err := pollDedicated(ctx, deleteTimeout, func(ctx context.Context) (bool, error) {
 		policy, err := r.client.GetDedicatedPublicAccess(ctx, databaseID, id)
 		if notFound(err) || err == nil && (policy.Status == "revoked" || policy.Status == "expired") {
 			return true, nil

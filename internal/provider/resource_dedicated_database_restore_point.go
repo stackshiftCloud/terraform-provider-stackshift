@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -24,13 +25,14 @@ func NewDedicatedDatabaseRestorePointResource() resource.Resource {
 type dedicatedDatabaseRestorePointResource struct{ client *client.Client }
 
 type dedicatedDatabaseRestorePointModel struct {
-	ID         types.String `tfsdk:"id"`
-	DatabaseID types.String `tfsdk:"database_id"`
-	Name       types.String `tfsdk:"name"`
-	Kind       types.String `tfsdk:"kind"`
-	Status     types.String `tfsdk:"status"`
-	SizeGB     types.Int64  `tfsdk:"size_gb"`
-	TakenAt    types.String `tfsdk:"taken_at"`
+	ID         types.String   `tfsdk:"id"`
+	DatabaseID types.String   `tfsdk:"database_id"`
+	Name       types.String   `tfsdk:"name"`
+	Kind       types.String   `tfsdk:"kind"`
+	Status     types.String   `tfsdk:"status"`
+	SizeGB     types.Int64    `tfsdk:"size_gb"`
+	TakenAt    types.String   `tfsdk:"taken_at"`
+	Timeouts   timeouts.Value `tfsdk:"timeouts"`
 }
 
 func (r *dedicatedDatabaseRestorePointResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -43,7 +45,7 @@ func (r *dedicatedDatabaseRestorePointResource) Configure(_ context.Context, req
 	}
 }
 
-func (r *dedicatedDatabaseRestorePointResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *dedicatedDatabaseRestorePointResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	keep := []planmodifier.String{stringplanmodifier.UseStateForUnknown()}
 	resp.Schema = schema.Schema{
 		Description: "A fast restore point of a Dedicated database, taken on demand and kept until you delete it. The database must be running and fast restore points must be available for it. You can keep a limited number of your own.",
@@ -55,6 +57,7 @@ func (r *dedicatedDatabaseRestorePointResource) Schema(_ context.Context, _ reso
 			"status":      schema.StringAttribute{Computed: true},
 			"size_gb":     schema.Int64Attribute{Computed: true},
 			"taken_at":    schema.StringAttribute{Computed: true},
+			"timeouts":    timeouts.Attributes(ctx, timeouts.Opts{Create: true, Delete: true}),
 		},
 	}
 }
@@ -82,8 +85,13 @@ func (r *dedicatedDatabaseRestorePointResource) Create(ctx context.Context, req 
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	createTimeout, timeoutDiags := plan.Timeouts.Create(ctx, dedicatedWaitLimit)
+	resp.Diagnostics.Append(timeoutDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	databaseID := plan.DatabaseID.ValueString()
-	if err := waitDedicatedRunning(ctx, r.client, databaseID, dedicatedWaitLimit); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, databaseID, createTimeout); err != nil {
 		resp.Diagnostics.AddError("The database isn't ready for a restore point", dedicatedErrorDetail(err))
 		return
 	}
@@ -94,7 +102,7 @@ func (r *dedicatedDatabaseRestorePointResource) Create(ctx context.Context, req 
 	}
 	plan.apply(point)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	err = pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
+	err = pollDedicated(ctx, createTimeout, func(ctx context.Context) (bool, error) {
 		current, err := r.find(ctx, databaseID, point.ID)
 		if err != nil {
 			return false, err
@@ -149,12 +157,17 @@ func (r *dedicatedDatabaseRestorePointResource) Delete(ctx context.Context, req 
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	deleteTimeout, timeoutDiags := state.Timeouts.Delete(ctx, dedicatedWaitLimit)
+	resp.Diagnostics.Append(timeoutDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	databaseID, id := state.DatabaseID.ValueString(), state.ID.ValueString()
 	if err := r.client.DeleteDedicatedRestorePoint(ctx, databaseID, id); err != nil {
 		resp.Diagnostics.AddError("Delete StackShift restore point failed", dedicatedErrorDetail(err))
 		return
 	}
-	err := pollDedicated(ctx, dedicatedWaitLimit, func(ctx context.Context) (bool, error) {
+	err := pollDedicated(ctx, deleteTimeout, func(ctx context.Context) (bool, error) {
 		point, err := r.find(ctx, databaseID, id)
 		if notFound(err) || err == nil && point.Status == "deleted" {
 			return true, nil

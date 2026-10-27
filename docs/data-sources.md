@@ -128,8 +128,13 @@ Computed fields: `project_id`, `name`, `engine` (`postgres` or `mysql`), `versio
 Lists the backups of a Dedicated database and the time window it can be restored to, from `GET /databases/{id}/backups`. Use it to pick a `target_time` or a `backup_id` for `restore_from`. The target you choose has to lie inside the restorable window, and it should be written out explicitly, as a literal time or a snapshot id, rather than pointing at `restorable_until`, which moves with every backup.
 
 ```hcl
-data "stackshift_dedicated_database_backups" "orders" {
-  database_id = stackshift_dedicated_database.orders.id
+variable "source_database_id" {
+  description = "An existing Dedicated database that already has backups."
+  type        = string
+}
+
+data "stackshift_dedicated_database_backups" "source" {
+  database_id = var.source_database_id
 }
 
 resource "stackshift_dedicated_database" "restored" {
@@ -138,7 +143,7 @@ resource "stackshift_dedicated_database" "restored" {
   storage_gb     = 20
 
   restore_from = {
-    source_database_id = stackshift_dedicated_database.orders.id
+    source_database_id = var.source_database_id
     target_time        = "2026-10-25T14:30:00Z"
   }
 }

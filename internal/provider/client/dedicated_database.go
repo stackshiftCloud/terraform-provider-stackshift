@@ -9,7 +9,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type DatabaseInstanceClassRevision struct {
@@ -177,6 +179,21 @@ type DedicatedError struct {
 	AmountMinor int64
 	Currency    string
 	Quote       *DatabaseChangeQuote
+	RetryAfter  time.Duration
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds < 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		return at.Sub(now)
+	}
+	return 0
 }
 
 func (e *DedicatedError) Error() string {
@@ -265,7 +282,8 @@ func (c *Client) dedicatedDo(ctx context.Context, method, path string, body any,
 			_ = json.Unmarshal(raw, out)
 		}
 		return &DedicatedError{StatusCode: resp.StatusCode, Code: parsed.code(), Message: message,
-			CheckoutURL: parsed.CheckoutURL, AmountMinor: parsed.AmountMinor, Currency: parsed.Currency, Quote: parsed.Quote}
+			CheckoutURL: parsed.CheckoutURL, AmountMinor: parsed.AmountMinor, Currency: parsed.Currency, Quote: parsed.Quote,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())}
 	}
 	if out == nil || len(raw) == 0 {
 		return nil

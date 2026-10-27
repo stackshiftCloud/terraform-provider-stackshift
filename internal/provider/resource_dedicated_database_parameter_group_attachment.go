@@ -72,7 +72,7 @@ func (r *dedicatedParameterGroupAttachmentResource) Create(ctx context.Context, 
 	plan.ID = plan.DatabaseID
 	timeout, diags := plan.Timeouts.Create(ctx, dedicatedWaitLimit)
 	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() || !r.attach(ctx, &plan, timeout, &resp.Diagnostics) {
+	if resp.Diagnostics.HasError() || !r.attach(ctx, &plan, timeout, true, plan.RestartToApply.ValueBool(), &resp.Diagnostics) {
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -112,14 +112,16 @@ func (r *dedicatedParameterGroupAttachmentResource) Update(ctx context.Context, 
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if plan.ParameterGroupID.Equal(state.ParameterGroupID) {
+	groupChanged := !plan.ParameterGroupID.Equal(state.ParameterGroupID)
+	restart := plan.RestartToApply.ValueBool() && (groupChanged || !state.RestartToApply.ValueBool())
+	if !groupChanged && !restart {
 		plan.Applied, plan.PendingRestart = state.Applied, state.PendingRestart
 		resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 		return
 	}
 	timeout, diags := plan.Timeouts.Update(ctx, dedicatedWaitLimit)
 	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() || !r.attach(ctx, &plan, timeout, &resp.Diagnostics) {
+	if resp.Diagnostics.HasError() || !r.attach(ctx, &plan, timeout, groupChanged, restart, &resp.Diagnostics) {
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -142,18 +144,20 @@ func (r *dedicatedParameterGroupAttachmentResource) ImportState(ctx context.Cont
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("restart_to_apply"), false)...)
 }
 
-func (r *dedicatedParameterGroupAttachmentResource) attach(ctx context.Context, plan *dedicatedParameterGroupAttachmentModel, timeout time.Duration, diags *diag.Diagnostics) bool {
+func (r *dedicatedParameterGroupAttachmentResource) attach(ctx context.Context, plan *dedicatedParameterGroupAttachmentModel, timeout time.Duration, setGroup, restart bool, diags *diag.Diagnostics) bool {
 	databaseID := plan.DatabaseID.ValueString()
 	groupID := plan.ParameterGroupID.ValueString()
 	if err := waitDedicatedRunning(ctx, r.client, databaseID, timeout); err != nil {
 		diags.AddError("The database isn't ready for a parameter group", dedicatedErrorDetail(err))
 		return false
 	}
-	if err := r.client.SetDedicatedParameterGroup(ctx, databaseID, &groupID); err != nil {
-		diags.AddError("Attach StackShift parameter group failed", dedicatedErrorDetail(err))
-		return false
+	if setGroup {
+		if err := r.client.SetDedicatedParameterGroup(ctx, databaseID, &groupID); err != nil {
+			diags.AddError("Attach StackShift parameter group failed", dedicatedErrorDetail(err))
+			return false
+		}
 	}
-	if plan.RestartToApply.ValueBool() {
+	if restart {
 		if err := r.client.ApplyDedicatedParameters(ctx, databaseID); err != nil {
 			diags.AddError("Restart for StackShift parameters failed", dedicatedErrorDetail(err))
 			return false

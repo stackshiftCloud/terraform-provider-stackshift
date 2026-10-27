@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
+	"github.com/hashicorp/terraform-plugin-framework/attr"
+	frameworkresource "github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
+	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
@@ -339,6 +347,14 @@ resource "stackshift_dedicated_database" "restored" {
 				ExpectError: regexp.MustCompile(`Set\s+exactly\s+one\s+of\s+target_time`),
 			},
 			{
+				Config:      config(restoreBlock("    backup_id = \"\"\n"), ""),
+				ExpectError: regexp.MustCompile(`backup_id\s+can't\s+be\s+an\s+empty\s+string`),
+			},
+			{
+				Config:      config(restoreBlock("    target_time = \"\"\n"), ""),
+				ExpectError: regexp.MustCompile(`target_time\s+can't\s+be\s+an\s+empty\s+string`),
+			},
+			{
 				Config:      config(restoreBlock("    target_time = \"yesterday\"\n"), ""),
 				ExpectError: regexp.MustCompile(`Use\s+an\s+RFC\s+3339\s+time`),
 			},
@@ -383,7 +399,7 @@ func TestDatabaseParameterGroupAndAttachment(t *testing.T) {
 	fake := runningDedicatedAPI()
 	startFakeDedicatedAPI(t, fake)
 	group, attachment := "stackshift_database_parameter_group.tuned", "stackshift_dedicated_database_parameter_group_attachment.tuned"
-	config := func(family, memory string) string {
+	config := func(family, memory string, restart bool) string {
 		return fmt.Sprintf(`
 resource "stackshift_database_parameter_group" "tuned" {
   name        = "tuned"
@@ -397,13 +413,13 @@ resource "stackshift_database_parameter_group" "tuned" {
 resource "stackshift_dedicated_database_parameter_group_attachment" "tuned" {
   database_id        = "db-1"
   parameter_group_id = stackshift_database_parameter_group.tuned.id
-  restart_to_apply   = true
+  restart_to_apply   = %t
 }
 
 data "stackshift_database_parameter_definitions" "postgres" {
   family = "postgres17"
 }
-`, family, memory)
+`, family, memory, restart)
 	}
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: dedicatedFactories,
@@ -415,30 +431,47 @@ data "stackshift_database_parameter_definitions" "postgres" {
 		},
 		Steps: []resource.TestStep{
 			{
-				Config: config("postgres17", "65536"),
+				Config: config("postgres17", "65536", false),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(group, "id", "grp-1"),
 					resource.TestCheckResourceAttr(group, "version", "1"),
 					resource.TestCheckResourceAttr(group, "parameters.work_mem", "65536"),
 					resource.TestCheckResourceAttr(attachment, "id", "db-1"),
 					resource.TestCheckResourceAttr(attachment, "parameter_group_id", "grp-1"),
-					resource.TestCheckResourceAttr(attachment, "applied", "true"),
-					resource.TestCheckResourceAttr(attachment, "pending_restart.#", "0"),
+					resource.TestCheckResourceAttr(attachment, "applied", "false"),
+					resource.TestCheckResourceAttr(attachment, "pending_restart.#", "1"),
 					resource.TestCheckResourceAttr("data.stackshift_database_parameter_definitions.postgres", "parameters.#", "2"),
 					resource.TestCheckResourceAttr("data.stackshift_database_parameter_definitions.postgres", "parameters.0.max", "2097152"),
 					resource.TestCheckResourceAttr("data.stackshift_database_parameter_definitions.postgres", "parameters.0.description", "Memory per sort for postgres17"),
 					resource.TestCheckResourceAttr("data.stackshift_database_parameter_definitions.postgres", "parameters.1.needs_restart", "true"),
 					resource.TestCheckResourceAttr("data.stackshift_database_parameter_definitions.postgres", "parameters.1.engine_default", "128MB"),
 					func(*terraform.State) error {
-						if fake.management.groupAttached != "grp-1" || fake.management.restarts != 1 || fake.management.restartReads < 2 {
-							return fmt.Errorf("attached = %q, restarts = %d, reads = %d", fake.management.groupAttached, fake.management.restarts, fake.management.restartReads)
+						if fake.management.groupAttached != "grp-1" || fake.management.restarts != 0 {
+							return fmt.Errorf("attached = %q, restarts = %d", fake.management.groupAttached, fake.management.restarts)
 						}
 						return nil
 					},
 				),
 			},
 			{
-				Config: config("postgres17", "131072"),
+				Config: config("postgres17", "65536", true),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(attachment, plancheck.ResourceActionUpdate),
+					plancheck.ExpectResourceAction(group, plancheck.ResourceActionNoop),
+				}},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(attachment, "applied", "true"),
+					resource.TestCheckResourceAttr(attachment, "pending_restart.#", "0"),
+					func(*terraform.State) error {
+						if fake.management.restarts != 1 || fake.management.restartReads < 2 {
+							return fmt.Errorf("restarts = %d, reads = %d", fake.management.restarts, fake.management.restartReads)
+						}
+						return nil
+					},
+				),
+			},
+			{
+				Config: config("postgres17", "131072", true),
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
 					plancheck.ExpectResourceAction(group, plancheck.ResourceActionUpdate),
 					plancheck.ExpectResourceAction(attachment, plancheck.ResourceActionNoop),
@@ -707,26 +740,143 @@ data "stackshift_database_credentials" "orders" {
 
 func TestDedicatedDatabaseConfigValidation(t *testing.T) {
 	startFakeDedicatedAPI(t, &fakeDedicatedAPI{})
-	config := func(name, window string) string {
+	config := func(name, window, extra string) string {
 		return fmt.Sprintf(`
 resource "stackshift_dedicated_database" "orders" {
   name           = %q
   instance_class = "s-2vcpu-4gb"
   storage_gb     = 20
+%s
   maintenance_window = {
     %s
   }
 }
-`, name, window)
+`, name, extra, window)
 	}
+	validWindow := "day_of_week = 1\n    start_minute = 60"
 	resource.UnitTest(t, resource.TestCase{
 		ProtoV6ProviderFactories: dedicatedFactories,
 		Steps: []resource.TestStep{
-			{Config: config("orders", "day_of_week = 7\n    start_minute = 0"), ExpectError: regexp.MustCompile(`day_of_week\s+is\s+0\s+\(Sunday\)\s+to\s+6`)},
-			{Config: config("orders", "day_of_week = 1\n    start_minute = 1440"), ExpectError: regexp.MustCompile(`start_minute\s+is\s+minutes\s+after\s+midnight\s+UTC,\s+0\s+to\s+1439`)},
-			{Config: config(" orders", "day_of_week = 1\n    start_minute = 60"), ExpectError: regexp.MustCompile(`Remove\s+the\s+surrounding\s+spaces`)},
+			{Config: config("orders", "day_of_week = 7\n    start_minute = 0", ""), ExpectError: regexp.MustCompile(`day_of_week\s+is\s+0\s+\(Sunday\)\s+to\s+6`)},
+			{Config: config("orders", "day_of_week = 1\n    start_minute = 1440", ""), ExpectError: regexp.MustCompile(`start_minute\s+is\s+minutes\s+after\s+midnight\s+UTC,\s+0\s+to\s+1439`)},
+			{
+				Config:      config("orders", "day_of_week = 9\n    start_minute = 2000", ""),
+				ExpectError: regexp.MustCompile(`(?s)day_of_week\s+is\s+0.*start_minute\s+is\s+minutes`),
+			},
+			{Config: config("orders", "day_of_week = null\n    start_minute = 5", ""), ExpectError: regexp.MustCompile(`day_of_week\s+is\s+required`)},
+			{Config: config("orders", "day_of_week = 2\n    start_minute = null", ""), ExpectError: regexp.MustCompile(`start_minute\s+is\s+required`)},
+			{Config: config(" orders", validWindow, ""), ExpectError: regexp.MustCompile(`Remove\s+the\s+surrounding\s+spaces`)},
+			{Config: config("orders", validWindow, `  engine = "postgre"`), ExpectError: regexp.MustCompile(`Use\s+postgres\s+or\s+mysql`)},
+			{Config: config("orders", validWindow, `  version = "seventeen"`), ExpectError: regexp.MustCompile(`Use\s+a\s+version\s+number`)},
+			{Config: config("orders", validWindow, `  version = "17.4.1"`), ExpectError: regexp.MustCompile(`Use\s+a\s+version\s+number`)},
 		},
 	})
+}
+
+func TestDedicatedDatabaseEngineAndVersionChangesNeedAllowReplace(t *testing.T) {
+	fastPolling(t)
+	fake := &fakeDedicatedAPI{}
+	startFakeDedicatedAPI(t, fake)
+	name := "stackshift_dedicated_database.orders"
+	config := func(engine, version, extra string) string {
+		return fmt.Sprintf(`
+resource "stackshift_dedicated_database" "orders" {
+  name           = "orders"
+  engine         = %q
+  version        = %q
+  instance_class = "s-2vcpu-4gb"
+  storage_gb     = 20
+%s
+}
+`, engine, version, extra)
+	}
+	refusal := regexp.MustCompile(`(?s)replaces\s+the\s+database\s+and\s+deletes\s+its\s+data.*allow_replace\s+=\s+true`)
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: dedicatedFactories,
+		Steps: []resource.TestStep{
+			{Config: config("postgres", "17", ""), Check: resource.TestCheckResourceAttr(name, "allow_replace", "false")},
+			{Config: config("postgres", "16", ""), ExpectError: refusal},
+			{Config: config("mysql", "8.4", ""), ExpectError: refusal},
+			{
+				Config:           config("postgres", "16", "  allow_replace = true"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(name, plancheck.ResourceActionDestroyBeforeCreate)}},
+				Check: func(*terraform.State) error {
+					if fake.createCount != 2 || fake.createBody["version"] != "16" {
+						return fmt.Errorf("creates = %d, body = %v", fake.createCount, fake.createBody)
+					}
+					return nil
+				},
+			},
+			{ResourceName: name, ImportState: true, ImportStateVerify: true, ImportStateVerifyIgnore: []string{"master_password", "allow_replace"}},
+		},
+	})
+}
+
+func dedicatedModelFixture() dedicatedDatabaseModel {
+	return dedicatedDatabaseModel{
+		ID: types.StringValue("db-1"), ProjectID: types.StringNull(), Name: types.StringValue("orders"), Engine: types.StringValue("postgres"), Version: types.StringValue("17"),
+		InstanceClass: types.StringValue("s-2vcpu-4gb"), StorageGB: types.Int64Value(20), StorageMaxGB: types.Int64Value(40), AllocatedStorageGB: types.Int64Value(20),
+		MasterUsername: types.StringNull(), DatabaseName: types.StringValue("app"), BackupRetentionDays: types.Int64Value(7), DeletionProtection: types.BoolValue(false),
+		MaintenanceWindow: types.ObjectValueMust(maintenanceWindowType.AttrTypes, map[string]attr.Value{"day_of_week": types.Int64Value(1), "start_minute": types.Int64Value(60)}),
+		Billing:           types.StringValue("monthly"), Standby: types.StringValue("off"), OnStandbyLoss: types.StringValue("degrade"), ApplyChanges: types.StringValue("window"),
+		AcceptPriceChanges: types.BoolValue(false), SkipFinalSnapshot: types.BoolValue(false), MasterPassword: types.StringNull(), Status: types.StringValue("running"),
+		Host: types.StringNull(), Port: types.Int64Null(), Endpoints: types.ListNull(dedicatedEndpointType), BillingStatus: types.StringValue("active"), CheckoutURL: types.StringNull(),
+		RestoreFrom: types.ObjectNull(restoreFromAttributeTypes), AllowReplace: types.BoolValue(false),
+		Timeouts: timeouts.Value{Object: types.ObjectNull(map[string]attr.Type{"create": types.StringType, "update": types.StringType, "delete": types.StringType})},
+	}
+}
+
+func modifyDedicatedPlan(t *testing.T, state, plan dedicatedDatabaseModel, config dedicatedDatabaseModel) frameworkresource.ModifyPlanResponse {
+	ctx := context.Background()
+	r := &dedicatedDatabaseResource{}
+	var schemaResp frameworkresource.SchemaResponse
+	r.Schema(ctx, frameworkresource.SchemaRequest{}, &schemaResp)
+	objectType := schemaResp.Schema.Type().TerraformType(ctx)
+	raw := func(model dedicatedDatabaseModel) tftypes.Value {
+		built := tfsdk.State{Schema: schemaResp.Schema, Raw: tftypes.NewValue(objectType, nil)}
+		if diags := built.Set(ctx, &model); diags.HasError() {
+			t.Fatal(diags)
+		}
+		return built.Raw
+	}
+	req := frameworkresource.ModifyPlanRequest{
+		Config: tfsdk.Config{Schema: schemaResp.Schema, Raw: raw(config)},
+		Plan:   tfsdk.Plan{Schema: schemaResp.Schema, Raw: raw(plan)},
+		State:  tfsdk.State{Schema: schemaResp.Schema, Raw: raw(state)},
+	}
+	resp := frameworkresource.ModifyPlanResponse{Plan: req.Plan}
+	r.ModifyPlan(ctx, req, &resp)
+	return resp
+}
+
+func TestDedicatedDatabaseModifyPlanGuardsReplacementAndWarnsAboutRestoreFrom(t *testing.T) {
+	state := dedicatedModelFixture()
+
+	engineChange := dedicatedModelFixture()
+	engineChange.Engine, engineChange.Version = types.StringValue("mysql"), types.StringValue("8.4")
+	refused := modifyDedicatedPlan(t, state, engineChange, engineChange)
+	if len(refused.Diagnostics.Errors()) != 2 || !strings.Contains(refused.Diagnostics.Errors()[0].Detail(), "deletes its data") {
+		t.Fatalf("diagnostics = %v", refused.Diagnostics)
+	}
+
+	engineChange.AllowReplace = types.BoolValue(true)
+	if allowed := modifyDedicatedPlan(t, state, engineChange, engineChange); allowed.Diagnostics.HasError() {
+		t.Fatalf("diagnostics = %v", allowed.Diagnostics)
+	}
+
+	restore := dedicatedModelFixture()
+	restore.RestoreFrom = types.ObjectValueMust(restoreFromAttributeTypes, map[string]attr.Value{
+		"source_database_id": types.StringValue("src-1"), "target_time": types.StringValue("2026-10-25T14:30:00Z"),
+		"backup_id": types.StringNull(), "from_mirror": types.BoolNull(),
+	})
+	warned := modifyDedicatedPlan(t, state, restore, restore)
+	if warned.Diagnostics.HasError() || len(warned.Diagnostics.Warnings()) != 1 || !strings.Contains(warned.Diagnostics.Warnings()[0].Detail(), "only matters when a database is created") {
+		t.Fatalf("diagnostics = %v", warned.Diagnostics)
+	}
+
+	if quiet := modifyDedicatedPlan(t, state, state, state); len(quiet.Diagnostics) != 0 {
+		t.Fatalf("diagnostics = %v", quiet.Diagnostics)
+	}
 }
 
 func TestDedicatedDatabaseRemovedFromStateWhenDeleting(t *testing.T) {
@@ -804,5 +954,69 @@ func TestPollDedicatedReportsLastErrorAtDeadline(t *testing.T) {
 	})
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "upstream down") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestPollDedicatedRetriesRateLimitAndTimeoutResponses(t *testing.T) {
+	fastPolling(t)
+	calls := 0
+	err := pollDedicated(context.Background(), time.Minute, func(context.Context) (bool, error) {
+		calls++
+		switch calls {
+		case 1:
+			return false, &client.DedicatedError{StatusCode: http.StatusTooManyRequests}
+		case 2:
+			return false, &client.DedicatedError{StatusCode: http.StatusRequestTimeout}
+		}
+		return true, nil
+	})
+	if err != nil || calls != 3 {
+		t.Fatalf("err = %v after %d calls", err, calls)
+	}
+}
+
+func TestPollDedicatedHonoursRetryAfterWithinTheTimeout(t *testing.T) {
+	fastPolling(t)
+	var first, second time.Time
+	calls := 0
+	err := pollDedicated(context.Background(), time.Minute, func(context.Context) (bool, error) {
+		calls++
+		if calls == 1 {
+			first = time.Now()
+			return false, &client.DedicatedError{StatusCode: http.StatusTooManyRequests, RetryAfter: 60 * time.Millisecond}
+		}
+		second = time.Now()
+		return true, nil
+	})
+	if err != nil || second.Sub(first) < 55*time.Millisecond {
+		t.Fatalf("err = %v, waited %v", err, second.Sub(first))
+	}
+
+	started := time.Now()
+	err = pollDedicated(context.Background(), 40*time.Millisecond, func(context.Context) (bool, error) {
+		return false, &client.DedicatedError{StatusCode: http.StatusTooManyRequests, RetryAfter: time.Hour}
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 2*time.Second {
+		t.Fatalf("err = %v after %v", err, time.Since(started))
+	}
+}
+
+func TestPollDedicatedFailsAtOnceOnCertificateErrors(t *testing.T) {
+	fastPolling(t)
+	for name, failure := range map[string]error{
+		"unknown authority":   &url.Error{Op: "Get", URL: "https://api.example.test", Err: x509.UnknownAuthorityError{}},
+		"invalid certificate": &url.Error{Op: "Get", URL: "https://api.example.test", Err: x509.CertificateInvalidError{Reason: x509.Expired}},
+		"wrong hostname":      &url.Error{Op: "Get", URL: "https://api.example.test", Err: x509.HostnameError{Host: "api.example.test"}},
+		"record header":       &url.Error{Op: "Get", URL: "https://api.example.test", Err: tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}},
+		"verification":        &url.Error{Op: "Get", URL: "https://api.example.test", Err: &tls.CertificateVerificationError{Err: errors.New("certificate has expired")}},
+	} {
+		calls := 0
+		err := pollDedicated(context.Background(), time.Minute, func(context.Context) (bool, error) {
+			calls++
+			return false, failure
+		})
+		if !errors.Is(err, failure) || calls != 1 {
+			t.Fatalf("%s: err = %v after %d calls", name, err, calls)
+		}
 	}
 }

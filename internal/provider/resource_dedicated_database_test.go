@@ -67,6 +67,8 @@ type fakeDedicatedAPI struct {
 	billingPuts     []map[string]any
 	restoreBody     map[string]any
 	management      managementState
+	becomesRunning  bool
+	runningReads    int
 	deleting        bool
 	deleteReads     int
 	createCount     int
@@ -147,6 +149,7 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "POST /databases":
 		f.created, f.createBody, f.class = true, body, body["instance_class"].(string)
 		f.createCount++
+		f.deleting, f.deleted, f.deleteReads, f.runningReads, f.becomesRunning = false, false, 0, 0, !f.paymentRequired
 		f.engine, f.version = body["type"].(string), "17"
 		if f.engine == "mysql" {
 			f.version = "8.4"
@@ -174,9 +177,15 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.status = "provisioning"
 		writeOK(w, http.StatusAccepted, map[string]any{"database": f.database(), "master_password": "s3cret-once", "checkout": map[string]any{"status": "paid"}})
 	case "GET /databases/db-1":
+		if f.becomesRunning {
+			if f.runningReads++; f.runningReads >= 2 {
+				f.status, f.becomesRunning = "running", false
+			}
+		}
 		writeOK(w, http.StatusOK, f.database())
 	case "POST /databases/src-1/restore":
 		f.created, f.restoreBody, f.class, f.engine, f.version, f.name, f.status = true, body, body["instance_class"].(string), "mysql", "8.4", body["name"].(string), "restoring"
+		f.deleting, f.deleted, f.deleteReads, f.runningReads, f.becomesRunning = false, false, 0, 0, true
 		f.settings = map[string]any{"storage_gb": body["storage_gb"], "storage_max_gb": 80, "backup_retention_days": 14, "deletion_protection": false,
 			"maintenance_window": map[string]any{"day_of_week": 1, "start_minute": 30}, "billing": body["billing"], "standby": "off", "on_standby_loss": "degrade"}
 		writeOK(w, http.StatusAccepted, map[string]any{"database": f.database(), "master_password": "restored-once", "checkout": map[string]any{"status": "paid"}})
@@ -303,7 +312,7 @@ func TestDedicatedDatabaseCreatePaidClassChangeAndDelete(t *testing.T) {
 					resource.TestCheckResourceAttr(name, "id", "db-1"),
 					resource.TestCheckResourceAttr(name, "master_password", "s3cret-once"),
 					resource.TestCheckResourceAttr(name, "allocated_storage_gb", "20"),
-					resource.TestCheckResourceAttr(name, "status", "provisioning"),
+					resource.TestCheckResourceAttr(name, "status", "running"),
 					resource.TestCheckResourceAttr(name, "billing_status", "active"),
 					resource.TestCheckResourceAttr(name, "version", "17"),
 					resource.TestCheckResourceAttr(name, "standby", "off"),
@@ -426,7 +435,7 @@ func TestDedicatedDatabaseCreatePaymentRequiredWarningHasCheckoutURL(t *testing.
 	model := dedicatedDatabaseModel{
 		ID: types.StringUnknown(), ProjectID: types.StringUnknown(), Name: types.StringValue("orders"), Engine: types.StringUnknown(), Version: types.StringUnknown(),
 		InstanceClass: types.StringValue("s-2vcpu-4gb"), StorageGB: types.Int64Value(20), MasterUsername: types.StringUnknown(), DatabaseName: types.StringUnknown(),
-		RestoreFrom: types.ObjectNull(restoreFromAttributeTypes), Timeouts: timeouts.Value{Object: types.ObjectNull(map[string]attr.Type{"create": types.StringType, "update": types.StringType, "delete": types.StringType})}, BackupRetentionDays: types.Int64Unknown(), StorageMaxGB: types.Int64Unknown(), AllocatedStorageGB: types.Int64Unknown(), MaintenanceWindow: types.ObjectUnknown(maintenanceWindowType.AttrTypes), DeletionProtection: types.BoolValue(false), Billing: types.StringValue("monthly"),
+		AllowReplace: types.BoolValue(false), RestoreFrom: types.ObjectNull(restoreFromAttributeTypes), Timeouts: timeouts.Value{Object: types.ObjectNull(map[string]attr.Type{"create": types.StringType, "update": types.StringType, "delete": types.StringType})}, BackupRetentionDays: types.Int64Unknown(), StorageMaxGB: types.Int64Unknown(), AllocatedStorageGB: types.Int64Unknown(), MaintenanceWindow: types.ObjectUnknown(maintenanceWindowType.AttrTypes), DeletionProtection: types.BoolValue(false), Billing: types.StringValue("monthly"),
 		Standby: types.StringValue("off"), OnStandbyLoss: types.StringValue("degrade"), ApplyChanges: types.StringValue("window"),
 		AcceptPriceChanges: types.BoolValue(false), SkipFinalSnapshot: types.BoolValue(false), MasterPassword: types.StringUnknown(),
 		Status: types.StringUnknown(), Host: types.StringUnknown(), Port: types.Int64Unknown(), Endpoints: types.ListUnknown(dedicatedEndpointType),

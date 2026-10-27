@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -23,12 +24,13 @@ func NewDedicatedDatabaseReplicaResource() resource.Resource {
 type dedicatedDatabaseReplicaResource struct{ client *client.Client }
 
 type dedicatedDatabaseReplicaModel struct {
-	ID                 types.String `tfsdk:"id"`
-	DatabaseID         types.String `tfsdk:"database_id"`
-	InstanceClass      types.String `tfsdk:"instance_class"`
-	AcceptPriceChanges types.Bool   `tfsdk:"accept_price_changes"`
-	Status             types.String `tfsdk:"status"`
-	Site               types.String `tfsdk:"site"`
+	ID                 types.String   `tfsdk:"id"`
+	DatabaseID         types.String   `tfsdk:"database_id"`
+	InstanceClass      types.String   `tfsdk:"instance_class"`
+	AcceptPriceChanges types.Bool     `tfsdk:"accept_price_changes"`
+	Status             types.String   `tfsdk:"status"`
+	Site               types.String   `tfsdk:"site"`
+	Timeouts           timeouts.Value `tfsdk:"timeouts"`
 }
 
 func (r *dedicatedDatabaseReplicaResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -41,7 +43,7 @@ func (r *dedicatedDatabaseReplicaResource) Configure(_ context.Context, req reso
 	}
 }
 
-func (r *dedicatedDatabaseReplicaResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *dedicatedDatabaseReplicaResource) Schema(ctx context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	keep := []planmodifier.String{stringplanmodifier.UseStateForUnknown()}
 	resp.Schema = schema.Schema{
 		Description: "A read replica of a Dedicated database. Up to 5 per database. Prices: https://stackshift.cloud/pricing.",
@@ -53,8 +55,9 @@ func (r *dedicatedDatabaseReplicaResource) Schema(_ context.Context, _ resource.
 				Description:   "Defaults to the database's size. Needs at least half the database's memory."},
 			"accept_price_changes": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
 				Description: "Allow the prorated charge for the replica to be taken from the wallet."},
-			"status": schema.StringAttribute{Computed: true, PlanModifiers: keep},
-			"site":   schema.StringAttribute{Computed: true, PlanModifiers: keep},
+			"status":   schema.StringAttribute{Computed: true, PlanModifiers: keep},
+			"site":     schema.StringAttribute{Computed: true, PlanModifiers: keep},
+			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{Create: true, Delete: true}),
 		},
 	}
 }
@@ -65,6 +68,13 @@ func (r *dedicatedDatabaseReplicaResource) Create(ctx context.Context, req resou
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	createTimeout, timeoutDiags := plan.Timeouts.Create(ctx, dedicatedWaitLimit)
+	resp.Diagnostics.Append(timeoutDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, createTimeout)
+	defer cancel()
 	databaseID := plan.DatabaseID.ValueString()
 	var replica *client.DedicatedReplica
 	if !paidChange(&resp.Diagnostics, "read replica", plan.AcceptPriceChanges.ValueBool(), func(confirm *int64) error {
@@ -120,6 +130,13 @@ func (r *dedicatedDatabaseReplicaResource) Delete(ctx context.Context, req resou
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	deleteTimeout, timeoutDiags := state.Timeouts.Delete(ctx, dedicatedWaitLimit)
+	resp.Diagnostics.Append(timeoutDiags...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, deleteTimeout)
+	defer cancel()
 	if err := r.client.RemoveDedicatedReplica(ctx, state.DatabaseID.ValueString(), state.ID.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Remove StackShift database replica failed", dedicatedErrorDetail(err))
 	}
