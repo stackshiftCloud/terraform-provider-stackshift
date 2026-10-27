@@ -387,10 +387,10 @@ The master password is returned only once, when the database is created. It is s
 | `storage_max_gb` | no | Autogrow limit. The server default is twice `storage_gb`, up to 1024. Changes in place. |
 | `engine` | no | `postgres` (default) or `mysql`. **Changing it replaces the database and deletes its data.** |
 | `version` | no | A version number such as `17` or `8.4`. PostgreSQL `15` to `18` (default `17`) or MySQL `8.4` (default). StackShift rejects versions it doesn't offer when you apply. **Changing it replaces the database and deletes its data.** |
-| `allow_replace` | no | Defaults to `false`. Terraform refuses to plan a change to `engine` or `version` unless this is `true`, because the change deletes the database and creates an empty one. To move the data, restore it into a new resource with `restore_from` instead. Only Terraform uses it; it is never sent to StackShift. Import sets it to `false`. |
-| `project_id` | no | Owning project. Changes replace the database. |
-| `master_username` | no | Defaults to `app_owner`. Changes replace the database. MySQL user names are at most 32 characters. |
-| `database_name` | no | Defaults to `app`. Changes replace the database. |
+| `allow_replace` | no | Defaults to `false`. Terraform refuses to plan a change to `engine`, `version`, `project_id`, `master_username` or `database_name` (including a value that is only known during apply) unless this is `true`, because the change deletes the database and creates an empty one. To move the data, restore it into a new resource with `restore_from` instead. It doesn't apply to `terraform apply -replace` or `terraform taint`, which you ask for explicitly. Only Terraform uses it; it is never sent to StackShift. Import sets it to `false`. |
+| `project_id` | no | Owning project. **Changing it replaces the database and deletes its data.** |
+| `master_username` | no | Defaults to `app_owner`. MySQL user names are at most 32 characters. **Changing it replaces the database and deletes its data.** |
+| `database_name` | no | Defaults to `app`. **Changing it replaces the database and deletes its data.** |
 | `backup_retention_days` | no | 7 to 35; defaults to 7. Changes in place. |
 | `deletion_protection` | no | Defaults to `false`. While true, the API refuses to delete the database. Changes in place, so set it to `false` and apply before destroying. |
 | `maintenance_window` | no | `{ day_of_week = 0-6, start_minute = 0-1439 }`, in UTC. Picked at random when left out, then read back. Changes in place; a size change waiting for the window moves with it. |
@@ -467,11 +467,13 @@ resource "stackshift_dedicated_database" "orders_before_incident" {
 terraform import stackshift_dedicated_database.orders <database_id>
 ```
 
-Import reads the settings back from the API and sets `apply_changes`, `accept_price_changes` and `skip_final_snapshot` to their defaults, so the first plan after an import is clean. It can't recover `master_password`, which is only returned when the database is created, and it leaves `restore_from` empty.
+Import reads the settings back from the API and sets `apply_changes`, `accept_price_changes`, `skip_final_snapshot` and `allow_replace` to their defaults, so the first plan after an import is clean. It can't recover `master_password`, which is only returned when the database is created, and it leaves `restore_from` empty.
 
 ### Timeouts
 
-`timeouts = { create = "45m", update = "45m", delete = "45m" }` sets how long Terraform works on the database before giving up; each defaults to 45 minutes. Creating and updating wait until the database is running, except a new database that is waiting for payment, which stays pending and doesn't wait. Deleting waits until the database is gone.
+`timeouts = { create = "45m", update = "45m", delete = "45m" }` sets how long Terraform works on the database before giving up; each defaults to 45 minutes, and the whole operation shares that one limit. Creating waits until the database is running, except a new database that is waiting for payment, which stays pending and doesn't wait. If the wait runs out or can't tell, the apply finishes with a warning and keeps the database in state, so the next plan or refresh picks it up and a paid database is never created twice; only a database that StackShift reports as failed makes the apply fail. Updating waits until the database is running again after a size, storage or standby change, and until a size change set to apply now has finished. Deleting waits until the database is gone.
+
+If you already have this resource in state from an earlier version of the provider, the first plan shows one update in place that changes nothing on StackShift; it records `allow_replace` and the `timeouts` block in state.
 
 ## `stackshift_dedicated_database_replica`
 
@@ -485,7 +487,7 @@ Adds a read replica to a Dedicated database through `POST /databases/{id}/replic
 | `instance_class` | no | Defaults to the database's size. |
 | `accept_price_changes` | no | Defaults to `false`. |
 
-Computed attributes: `id`, `status` and `site`. `timeouts = { create = "45m", delete = "45m" }` sets how long Terraform works on adding or removing the replica.
+Computed attributes: `id`, `status` and `site`. `timeouts = { create = "45m", delete = "45m" }` sets how long the apply waits for the replica to be running and, on destroy, to be gone. If the wait runs out, the apply finishes with a warning and keeps the replica in state; only a replica that StackShift reports as failed makes it fail.
 
 ### Import
 

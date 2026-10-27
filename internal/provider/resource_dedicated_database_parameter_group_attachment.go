@@ -145,9 +145,11 @@ func (r *dedicatedParameterGroupAttachmentResource) ImportState(ctx context.Cont
 }
 
 func (r *dedicatedParameterGroupAttachmentResource) attach(ctx context.Context, plan *dedicatedParameterGroupAttachmentModel, timeout time.Duration, setGroup, restart bool, diags *diag.Diagnostics) bool {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	databaseID := plan.DatabaseID.ValueString()
 	groupID := plan.ParameterGroupID.ValueString()
-	if err := waitDedicatedRunning(ctx, r.client, databaseID, timeout); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, databaseID); err != nil {
 		diags.AddError("The database isn't ready for a parameter group", dedicatedErrorDetail(err))
 		return false
 	}
@@ -162,7 +164,7 @@ func (r *dedicatedParameterGroupAttachmentResource) attach(ctx context.Context, 
 			diags.AddError("Restart for StackShift parameters failed", dedicatedErrorDetail(err))
 			return false
 		}
-		err := pollDedicated(ctx, timeout, func(ctx context.Context) (bool, error) {
+		err := pollDedicated(ctx, func(ctx context.Context) (bool, error) {
 			parameters, err := r.client.GetDedicatedParameters(ctx, databaseID)
 			if err != nil {
 				return false, err
@@ -174,6 +176,10 @@ func (r *dedicatedParameterGroupAttachmentResource) attach(ctx context.Context, 
 		})
 		if err != nil {
 			diags.AddError("StackShift parameters weren't applied", dedicatedErrorDetail(err))
+			return false
+		}
+		if err := waitDedicatedRunning(ctx, r.client, databaseID); err != nil {
+			diags.AddError("The database didn't come back after restarting", dedicatedErrorDetail(err))
 			return false
 		}
 	}

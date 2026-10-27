@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -154,13 +155,14 @@ func (r *dedicatedDatabaseResource) Schema(ctx context.Context, _ resource.Schem
 	resp.Schema = schema.Schema{
 		Description: "A Dedicated PostgreSQL or MySQL database. Dedicated must be switched on for your account. Prices: https://stackshift.cloud/pricing.",
 		Attributes: map[string]schema.Attribute{
-			"id":         schema.StringAttribute{Computed: true, PlanModifiers: keepString},
-			"project_id": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: keepThenReplace},
-			"name":       schema.StringAttribute{Required: true, Description: "3 to 40 lowercase letters, digits and dashes. Changes in place."},
+			"id": schema.StringAttribute{Computed: true, PlanModifiers: keepString},
+			"project_id": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: keepThenReplace,
+				Description: "Owning project. Changing this replaces the database and deletes its data, so it needs allow_replace = true."},
+			"name": schema.StringAttribute{Required: true, Description: "3 to 40 lowercase letters, digits and dashes. Changes in place."},
 			"engine": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: keepThenReplace,
-				Description: "postgres (default) or mysql. Changing this replaces the database."},
+				Description: "postgres (default) or mysql. Changing this replaces the database and deletes its data, so it needs allow_replace = true."},
 			"version": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: keepThenReplace,
-				Description: "PostgreSQL 15 to 18 (default 17) or MySQL 8.4 (default). Changing this replaces the database."},
+				Description: "PostgreSQL 15 to 18 (default 17) or MySQL 8.4 (default). Changing this replaces the database and deletes its data, so it needs allow_replace = true."},
 			"instance_class": schema.StringAttribute{Required: true, Description: "A slug from stackshift_database_instance_classes. Changes in place."},
 			"storage_gb":     schema.Int64Attribute{Required: true, Description: "10 to 1024. Grows in place; it can't shrink. Growth from autogrow isn't reported as drift."},
 			"storage_max_gb": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
@@ -168,9 +170,9 @@ func (r *dedicatedDatabaseResource) Schema(ctx context.Context, _ resource.Schem
 			"allocated_storage_gb": schema.Int64Attribute{Computed: true, Description: "The current storage size, including growth from autogrow."},
 			"master_username": schema.StringAttribute{Optional: true, Computed: true,
 				PlanModifiers: append([]planmodifier.String{keepStateWhenUnsetString{}}, replaceIfSetString()...),
-				Description:   "Defaults to app_owner. Changing this replaces the database."},
+				Description:   "Defaults to app_owner. Changing this replaces the database and deletes its data, so it needs allow_replace = true."},
 			"database_name": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: keepThenReplace,
-				Description: "Defaults to app. Changing this replaces the database."},
+				Description: "Defaults to app. Changing this replaces the database and deletes its data, so it needs allow_replace = true."},
 			"backup_retention_days": schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()},
 				Description: "7 to 35; 7 when left out. Changes in place."},
 			"deletion_protection": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
@@ -225,7 +227,7 @@ func (r *dedicatedDatabaseResource) Schema(ctx context.Context, _ resource.Schem
 				},
 			},
 			"allow_replace": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
-				Description: "Changing engine or version replaces the database and deletes its data, so Terraform refuses unless this is true. Never sent to StackShift."},
+				Description: "Changing engine, version, project_id, master_username or database_name replaces the database and deletes its data, so Terraform refuses unless this is true. It doesn't apply to terraform apply -replace or taint, which you ask for explicitly. Never sent to StackShift."},
 			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{Create: true, Update: true, Delete: true}),
 		},
 	}
@@ -242,10 +244,22 @@ func (r *dedicatedDatabaseResource) ModifyPlan(ctx context.Context, req resource
 		return
 	}
 	if !plan.AllowReplace.ValueBool() {
-		for name, values := range map[string][2]types.String{"engine": {plan.Engine, state.Engine}, "version": {plan.Version, state.Version}} {
-			if values[0].IsUnknown() || !values[0].IsNull() && !values[0].Equal(values[1]) {
-				resp.Diagnostics.AddAttributeError(path.Root(name), "This would delete the database",
-					"Changing engine or version, or setting it from a value Terraform only knows during apply, replaces the database and deletes its data. Set allow_replace = true to go ahead, or move the data with restore_from into a new resource instead.")
+		guarded := []struct {
+			name           string
+			planned, prior types.String
+			fromNull       bool
+		}{
+			{"engine", plan.Engine, state.Engine, true}, {"version", plan.Version, state.Version, true},
+			{"project_id", plan.ProjectID, state.ProjectID, true}, {"database_name", plan.DatabaseName, state.DatabaseName, true},
+			{"master_username", plan.MasterUsername, state.MasterUsername, false},
+		}
+		for _, attribute := range guarded {
+			if !attribute.fromNull && attribute.prior.IsNull() {
+				continue
+			}
+			if attribute.planned.IsUnknown() || !attribute.planned.IsNull() && !attribute.planned.Equal(attribute.prior) {
+				resp.Diagnostics.AddAttributeError(path.Root(attribute.name), "This would delete the database",
+					"Changing engine, version, project_id, master_username or database_name, or setting one from a value Terraform only knows during apply, replaces the database and deletes its data. Set allow_replace = true to go ahead, or move the data with restore_from into a new resource instead.")
 			}
 		}
 	}
@@ -400,8 +414,14 @@ func (r *dedicatedDatabaseResource) Create(ctx context.Context, req resource.Cre
 	if pendingPayment || resp.Diagnostics.HasError() {
 		return
 	}
-	if err := waitDedicatedRunning(ctx, r.client, plan.ID.ValueString(), createTimeout); err != nil {
-		resp.Diagnostics.AddError("StackShift dedicated database didn't start", dedicatedErrorDetail(err))
+	if err := waitDedicatedRunning(ctx, r.client, plan.ID.ValueString()); err != nil {
+		var failed dedicatedFailedError
+		if errors.As(err, &failed) {
+			resp.Diagnostics.AddError("StackShift dedicated database didn't start", dedicatedErrorDetail(err))
+			return
+		}
+		resp.Diagnostics.AddWarning("The database is still being prepared",
+			fmt.Sprintf("The database %s was created but isn't running yet (%s). It is kept in Terraform state, and the next plan or refresh will pick it up once it is ready.", plan.ID.ValueString(), err))
 		return
 	}
 	if db, err := r.client.GetDedicatedDatabase(ctx, plan.ID.ValueString()); err == nil {
@@ -554,6 +574,7 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 	id := plan.ID.ValueString()
 	accept := plan.AcceptPriceChanges.ValueBool()
 	save := func() { resp.Diagnostics.Append(resp.State.Set(ctx, &working)...) }
+	disruptive, resizeNow := false, false
 
 	settings := map[string]any{}
 	if !plan.Name.Equal(state.Name) {
@@ -595,6 +616,7 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 			save()
 			return
 		}
+		disruptive = true
 	}
 	working.StorageGB, working.StorageMaxGB = plan.StorageGB, plan.StorageMaxGB
 
@@ -606,6 +628,7 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 			return
 		}
 		working.Standby, working.OnStandbyLoss = plan.Standby, plan.OnStandbyLoss
+		disruptive = true
 	}
 
 	if !plan.InstanceClass.Equal(state.InstanceClass) {
@@ -616,6 +639,8 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 			return
 		}
 		working.InstanceClass = plan.InstanceClass
+		disruptive = true
+		resizeNow = plan.ApplyChanges.ValueString() == "now"
 	}
 
 	if !plan.Billing.Equal(state.Billing) {
@@ -628,8 +653,12 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 		working.Billing = plan.Billing
 	}
 
-	if db, err := r.client.GetDedicatedDatabase(ctx, id); err == nil && dedicatedTransitional(db.Status) {
-		if err := waitDedicatedRunning(ctx, r.client, id, updateTimeout); err != nil {
+	if disruptive {
+		err := waitDedicatedRunning(ctx, r.client, id)
+		if err == nil && resizeNow {
+			err = r.waitForSizeChange(ctx, id)
+		}
+		if err != nil {
 			resp.Diagnostics.AddError("StackShift dedicated database didn't finish the change", dedicatedErrorDetail(err))
 			save()
 			return
@@ -647,6 +676,25 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 	save()
 }
 
+func (r *dedicatedDatabaseResource) waitForSizeChange(ctx context.Context, id string) error {
+	return pollDedicated(ctx, func(ctx context.Context) (bool, error) {
+		ha, err := r.client.GetDedicatedHA(ctx, id)
+		if err != nil {
+			return false, err
+		}
+		if ha.SizeChange == nil {
+			return true, nil
+		}
+		switch ha.SizeChange.Status {
+		case "completed", "cancelled":
+			return true, nil
+		case "failed":
+			return false, fmt.Errorf("changing to %s failed: %s", ha.SizeChange.ToClass, ha.SizeChange.FailureMessage)
+		}
+		return false, nil
+	})
+}
+
 func (r *dedicatedDatabaseResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state dedicatedDatabaseModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -658,12 +706,14 @@ func (r *dedicatedDatabaseResource) Delete(ctx context.Context, req resource.Del
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, deleteTimeout)
+	defer cancel()
 	id := state.ID.ValueString()
 	if err := r.client.DeleteDedicatedDatabase(ctx, id, state.SkipFinalSnapshot.ValueBool()); err != nil {
 		resp.Diagnostics.AddError("Delete StackShift dedicated database failed", dedicatedErrorDetail(err))
 		return
 	}
-	err := pollDedicated(ctx, deleteTimeout, func(ctx context.Context) (bool, error) {
+	err := pollDedicated(ctx, func(ctx context.Context) (bool, error) {
 		db, err := r.client.GetDedicatedDatabase(ctx, id)
 		if notFound(err) {
 			return true, nil

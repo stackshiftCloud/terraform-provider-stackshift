@@ -2,6 +2,8 @@ package provider
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/path"
@@ -94,6 +96,34 @@ func (r *dedicatedDatabaseReplicaResource) Create(ctx context.Context, req resou
 		plan.applyMember(ha)
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	err := pollDedicated(ctx, func(ctx context.Context) (bool, error) {
+		ha, err := r.client.GetDedicatedHA(ctx, databaseID)
+		if err != nil {
+			return false, err
+		}
+		if !plan.applyMember(ha) {
+			return false, nil
+		}
+		if plan.Status.ValueString() == "failed" {
+			return false, dedicatedFailedError{}
+		}
+		return plan.Status.ValueString() == "running", nil
+	})
+	if err != nil {
+		var failed dedicatedFailedError
+		if errors.As(err, &failed) {
+			resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+			resp.Diagnostics.AddError("StackShift read replica didn't start", dedicatedErrorDetail(err))
+			return
+		}
+		resp.Diagnostics.AddWarning("The read replica is still being prepared",
+			fmt.Sprintf("The replica %s was added but isn't running yet (%s). It is kept in Terraform state, and the next plan or refresh will pick it up once it is ready.", plan.ID.ValueString(), err))
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 func (r *dedicatedDatabaseReplicaResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -139,6 +169,20 @@ func (r *dedicatedDatabaseReplicaResource) Delete(ctx context.Context, req resou
 	defer cancel()
 	if err := r.client.RemoveDedicatedReplica(ctx, state.DatabaseID.ValueString(), state.ID.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Remove StackShift database replica failed", dedicatedErrorDetail(err))
+		return
+	}
+	err := pollDedicated(ctx, func(ctx context.Context) (bool, error) {
+		ha, err := r.client.GetDedicatedHA(ctx, state.DatabaseID.ValueString())
+		if notFound(err) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return !state.applyMember(ha) || state.Status.ValueString() == "retired", nil
+	})
+	if err != nil {
+		resp.Diagnostics.AddError("StackShift read replica wasn't removed", dedicatedErrorDetail(err))
 	}
 }
 

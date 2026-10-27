@@ -74,7 +74,7 @@ func (r *dedicatedDatabasePublicAccessResource) Schema(ctx context.Context, _ re
 				Description: "When restricted access ends, as a UTC time such as 2026-12-01T00:00:00Z, between 1 hour from now and the platform limit. Required for restricted. For anywhere it's the current renewal time."},
 			"acknowledge_public_exposure": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false), PlanModifiers: []planmodifier.Bool{boolplanmodifier.RequiresReplace()},
 				Description: "Set to true to confirm that anywhere opens the database to the internet. Only used with anywhere."},
-			"status":          schema.StringAttribute{Computed: true},
+			"status":          schema.StringAttribute{Computed: true, PlanModifiers: keep},
 			"public_hostname": schema.StringAttribute{Computed: true, PlanModifiers: keep},
 			"public_port":     schema.Int64Attribute{Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()}},
 			"timeouts":        timeouts.Attributes(ctx, timeouts.Opts{Create: true, Delete: true}),
@@ -149,8 +149,10 @@ func (r *dedicatedDatabasePublicAccessResource) Create(ctx context.Context, req 
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, createTimeout)
+	defer cancel()
 	databaseID := plan.DatabaseID.ValueString()
-	if err := waitDedicatedRunning(ctx, r.client, databaseID, createTimeout); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, databaseID); err != nil {
 		resp.Diagnostics.AddError("The database isn't ready for public access", dedicatedErrorDetail(err))
 		return
 	}
@@ -172,7 +174,7 @@ func (r *dedicatedDatabasePublicAccessResource) Create(ctx context.Context, req 
 	}
 	plan.apply(ctx, policy, &resp.Diagnostics)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	err = pollDedicated(ctx, createTimeout, func(ctx context.Context) (bool, error) {
+	err = pollDedicated(ctx, func(ctx context.Context) (bool, error) {
 		current, err := r.client.GetDedicatedPublicAccess(ctx, databaseID, policy.ID)
 		if err != nil {
 			return false, err
@@ -232,12 +234,14 @@ func (r *dedicatedDatabasePublicAccessResource) Delete(ctx context.Context, req 
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, deleteTimeout)
+	defer cancel()
 	databaseID, id := state.DatabaseID.ValueString(), state.ID.ValueString()
 	if err := r.client.RevokeDedicatedPublicAccess(ctx, databaseID, id); err != nil {
 		resp.Diagnostics.AddError("Turn off StackShift public access failed", dedicatedErrorDetail(err))
 		return
 	}
-	err := pollDedicated(ctx, deleteTimeout, func(ctx context.Context) (bool, error) {
+	err := pollDedicated(ctx, func(ctx context.Context) (bool, error) {
 		policy, err := r.client.GetDedicatedPublicAccess(ctx, databaseID, id)
 		if notFound(err) || err == nil && (policy.Status == "revoked" || policy.Status == "expired") {
 			return true, nil

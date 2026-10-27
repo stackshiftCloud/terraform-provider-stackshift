@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"regexp"
 	"strings"
@@ -43,6 +45,12 @@ type managementState struct {
 	insightsDays   float64
 	restartReads   int
 	revokedPolicy  string
+}
+
+func pollWithin(timeout time.Duration, done func(context.Context) (bool, error)) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return pollDedicated(ctx, done)
 }
 
 func fastPolling(t *testing.T) {
@@ -573,8 +581,26 @@ data "stackshift_dedicated_database_backups" "orders" {
 					},
 				),
 			},
-			{ResourceName: snapshot, ImportState: true, ImportStateId: "db-1:snap-1", ImportStateVerify: true},
-			{ResourceName: point, ImportState: true, ImportStateId: "db-1:rp-1", ImportStateVerify: true},
+			{
+				Config: strings.NewReplacer(
+					`name        = "before-migration"`, "name        = \"before-migration\"\n  timeouts = {\n    create = \"20m\"\n    delete = \"20m\"\n  }",
+					`name        = "nightly"`, "name        = \"nightly\"\n  timeouts = {\n    create = \"20m\"\n    delete = \"20m\"\n  }",
+				).Replace(config(12, "  weekly = {\n    enabled = false\n    keep    = 4\n  }")),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(snapshot, plancheck.ResourceActionUpdate),
+					plancheck.ExpectResourceAction(point, plancheck.ResourceActionUpdate),
+				}},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(snapshot, "status", "available"),
+					resource.TestCheckResourceAttr(snapshot, "size_bytes", "1024"),
+					resource.TestCheckResourceAttr(snapshot, "timeouts.create", "20m"),
+					resource.TestCheckResourceAttr(point, "status", "available"),
+					resource.TestCheckResourceAttr(point, "size_gb", "20"),
+					resource.TestCheckResourceAttr(point, "taken_at", "2026-10-26T10:01:00Z"),
+				),
+			},
+			{ResourceName: snapshot, ImportState: true, ImportStateId: "db-1:snap-1", ImportStateVerify: true, ImportStateVerifyIgnore: []string{"timeouts"}},
+			{ResourceName: point, ImportState: true, ImportStateId: "db-1:rp-1", ImportStateVerify: true, ImportStateVerifyIgnore: []string{"timeouts"}},
 			{ResourceName: schedule, ImportState: true, ImportStateId: "db-1", ImportStateVerify: true},
 		},
 	})
@@ -628,6 +654,14 @@ resource "stackshift_dedicated_database_public_access" "office" {
 				),
 			},
 			{ResourceName: name, ImportState: true, ImportStateId: "db-1:pol-1", ImportStateVerify: true},
+			{
+				Config:           config(restricted + "\n  timeouts = {\n    create = \"20m\"\n    delete = \"20m\"\n  }"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectResourceAction(name, plancheck.ResourceActionUpdate)}},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(name, "status", "active"),
+					resource.TestCheckResourceAttr(name, "timeouts.delete", "20m"),
+				),
+			},
 			{
 				Config: config(`  access_mode                 = "anywhere"
   acknowledge_public_exposure = true`),
@@ -917,7 +951,7 @@ func TestDedicatedDatabaseRemovedFromStateWhenDeleting(t *testing.T) {
 func TestPollDedicatedRetriesServerAndTransportErrors(t *testing.T) {
 	fastPolling(t)
 	calls := 0
-	err := pollDedicated(context.Background(), time.Minute, func(context.Context) (bool, error) {
+	err := pollWithin(time.Minute, func(context.Context) (bool, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -943,7 +977,7 @@ func TestPollDedicatedFailsAtOnceOnClientErrors(t *testing.T) {
 		"other":       fmt.Errorf("the snapshot failed"),
 	} {
 		calls := 0
-		err := pollDedicated(context.Background(), time.Minute, func(context.Context) (bool, error) {
+		err := pollWithin(time.Minute, func(context.Context) (bool, error) {
 			calls++
 			return false, failure
 		})
@@ -955,7 +989,7 @@ func TestPollDedicatedFailsAtOnceOnClientErrors(t *testing.T) {
 
 func TestPollDedicatedReportsLastErrorAtDeadline(t *testing.T) {
 	fastPolling(t)
-	err := pollDedicated(context.Background(), 20*time.Millisecond, func(context.Context) (bool, error) {
+	err := pollWithin(20*time.Millisecond, func(context.Context) (bool, error) {
 		return false, &client.DedicatedError{StatusCode: http.StatusBadGateway, Message: "upstream down"}
 	})
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "upstream down") {
@@ -966,7 +1000,7 @@ func TestPollDedicatedReportsLastErrorAtDeadline(t *testing.T) {
 func TestPollDedicatedRetriesRateLimitAndTimeoutResponses(t *testing.T) {
 	fastPolling(t)
 	calls := 0
-	err := pollDedicated(context.Background(), time.Minute, func(context.Context) (bool, error) {
+	err := pollWithin(time.Minute, func(context.Context) (bool, error) {
 		calls++
 		switch calls {
 		case 1:
@@ -985,7 +1019,7 @@ func TestPollDedicatedHonoursRetryAfterWithinTheTimeout(t *testing.T) {
 	fastPolling(t)
 	var first, second time.Time
 	calls := 0
-	err := pollDedicated(context.Background(), time.Minute, func(context.Context) (bool, error) {
+	err := pollWithin(time.Minute, func(context.Context) (bool, error) {
 		calls++
 		if calls == 1 {
 			first = time.Now()
@@ -999,7 +1033,7 @@ func TestPollDedicatedHonoursRetryAfterWithinTheTimeout(t *testing.T) {
 	}
 
 	started := time.Now()
-	err = pollDedicated(context.Background(), 40*time.Millisecond, func(context.Context) (bool, error) {
+	err = pollWithin(40*time.Millisecond, func(context.Context) (bool, error) {
 		return false, &client.DedicatedError{StatusCode: http.StatusTooManyRequests, RetryAfter: time.Hour}
 	})
 	if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 2*time.Second {
@@ -1015,14 +1049,153 @@ func TestPollDedicatedFailsAtOnceOnCertificateErrors(t *testing.T) {
 		"wrong hostname":      &url.Error{Op: "Get", URL: "https://api.example.test", Err: x509.HostnameError{Host: "api.example.test"}},
 		"record header":       &url.Error{Op: "Get", URL: "https://api.example.test", Err: tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}},
 		"verification":        &url.Error{Op: "Get", URL: "https://api.example.test", Err: &tls.CertificateVerificationError{Err: errors.New("certificate has expired")}},
+		"handshake alert":     &url.Error{Op: "Get", URL: "https://api.example.test", Err: &net.OpError{Op: "remote error", Err: tls.AlertError(40)}},
 	} {
 		calls := 0
-		err := pollDedicated(context.Background(), time.Minute, func(context.Context) (bool, error) {
+		err := pollWithin(time.Minute, func(context.Context) (bool, error) {
 			calls++
 			return false, failure
 		})
 		if !errors.Is(err, failure) || calls != 1 {
 			t.Fatalf("%s: err = %v after %d calls", name, err, calls)
 		}
+	}
+}
+
+func TestDedicatedDatabaseCreateWaitTimeoutKeepsTheDatabase(t *testing.T) {
+	fastPolling(t)
+	fake := &fakeDedicatedAPI{neverRuns: true}
+	startFakeDedicatedAPI(t, fake)
+	name := "stackshift_dedicated_database.orders"
+	config := dedicatedDatabaseConfig("s-2vcpu-4gb", "  timeouts = {\n    create = \"150ms\"\n  }")
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: dedicatedFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(name, "id", "db-1"),
+					resource.TestCheckResourceAttr(name, "status", "provisioning"),
+				),
+			},
+			{
+				Config:           config,
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}},
+				Check: func(*terraform.State) error {
+					if fake.createCount != 1 {
+						return fmt.Errorf("the database was created %d times", fake.createCount)
+					}
+					return nil
+				},
+			},
+		},
+	})
+}
+
+func TestDedicatedDatabaseCreateWaitTimeoutWarns(t *testing.T) {
+	fastPolling(t)
+	ctx := context.Background()
+	fake := &fakeDedicatedAPI{neverRuns: true}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	r := &dedicatedDatabaseResource{client: client.New(server.URL, "sspat_test", nil)}
+	var schemaResp frameworkresource.SchemaResponse
+	r.Schema(ctx, frameworkresource.SchemaRequest{}, &schemaResp)
+	objectType := schemaResp.Schema.Type().TerraformType(ctx)
+	model := dedicatedModelFixture()
+	model.ID, model.Status, model.Host, model.Port = types.StringUnknown(), types.StringUnknown(), types.StringUnknown(), types.Int64Unknown()
+	model.Engine, model.Version, model.ProjectID, model.MasterUsername, model.DatabaseName = types.StringUnknown(), types.StringUnknown(), types.StringUnknown(), types.StringUnknown(), types.StringUnknown()
+	model.BackupRetentionDays, model.StorageMaxGB, model.AllocatedStorageGB = types.Int64Unknown(), types.Int64Unknown(), types.Int64Unknown()
+	model.MaintenanceWindow, model.Endpoints = types.ObjectUnknown(maintenanceWindowType.AttrTypes), types.ListUnknown(dedicatedEndpointType)
+	model.MasterPassword, model.BillingStatus, model.CheckoutURL = types.StringUnknown(), types.StringUnknown(), types.StringUnknown()
+	model.Timeouts = timeouts.Value{Object: types.ObjectValueMust(
+		map[string]attr.Type{"create": types.StringType, "update": types.StringType, "delete": types.StringType},
+		map[string]attr.Value{"create": types.StringValue("100ms"), "update": types.StringNull(), "delete": types.StringNull()},
+	)}
+	plan := tfsdk.Plan{Schema: schemaResp.Schema, Raw: tftypes.NewValue(objectType, nil)}
+	if diags := plan.Set(ctx, &model); diags.HasError() {
+		t.Fatal(diags)
+	}
+	resp := frameworkresource.CreateResponse{State: tfsdk.State{Schema: schemaResp.Schema, Raw: tftypes.NewValue(objectType, nil)}}
+	r.Create(ctx, frameworkresource.CreateRequest{Plan: plan}, &resp)
+	warnings := resp.Diagnostics.Warnings()
+	if resp.Diagnostics.HasError() || len(warnings) != 1 || !strings.Contains(warnings[0].Detail(), "next plan or refresh will pick it up") {
+		t.Fatalf("diagnostics = %v", resp.Diagnostics)
+	}
+	var saved dedicatedDatabaseModel
+	if diags := resp.State.Get(ctx, &saved); diags.HasError() || saved.ID.ValueString() != "db-1" || saved.Status.ValueString() != "provisioning" {
+		t.Fatalf("state = %+v, diagnostics = %v", saved, diags)
+	}
+}
+
+func TestDedicatedDatabaseCreateFailedStatusIsAnError(t *testing.T) {
+	fastPolling(t)
+	startFakeDedicatedAPI(t, &fakeDedicatedAPI{failOnStart: true})
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: dedicatedFactories,
+		Steps: []resource.TestStep{{
+			Config:      dedicatedDatabaseConfig("s-2vcpu-4gb", ""),
+			ExpectError: regexp.MustCompile(`failed\s+to\s+start`),
+		}},
+	})
+}
+
+func TestDedicatedDatabaseResizeNowWaitsForTheSizeChange(t *testing.T) {
+	fastPolling(t)
+	fake := &fakeDedicatedAPI{}
+	startFakeDedicatedAPI(t, fake)
+	name := "stackshift_dedicated_database.orders"
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: dedicatedFactories,
+		Steps: []resource.TestStep{
+			{Config: dedicatedDatabaseConfig("s-2vcpu-4gb", "")},
+			{
+				Config: dedicatedDatabaseConfig("d-4vcpu-16gb", "  accept_price_changes = true\n  apply_changes = \"now\""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(name, "instance_class", "d-4vcpu-16gb"),
+					func(*terraform.State) error {
+						if fake.sizeReads < 2 || fake.pendingClass != "" {
+							return fmt.Errorf("size change polled %d times, still pending %q", fake.sizeReads, fake.pendingClass)
+						}
+						return nil
+					},
+				),
+			},
+		},
+	})
+}
+
+func TestDedicatedDatabaseModifyPlanGuardsEveryReplacingAttribute(t *testing.T) {
+	state := dedicatedModelFixture()
+	state.ProjectID, state.MasterUsername = types.StringValue("project-1"), types.StringValue("app_owner")
+	for name, change := range map[string]func(*dedicatedDatabaseModel){
+		"project_id":      func(m *dedicatedDatabaseModel) { m.ProjectID = types.StringValue("project-2") },
+		"database_name":   func(m *dedicatedDatabaseModel) { m.DatabaseName = types.StringValue("shop") },
+		"master_username": func(m *dedicatedDatabaseModel) { m.MasterUsername = types.StringValue("admin") },
+	} {
+		plan := state
+		change(&plan)
+		refused := modifyDedicatedPlan(t, state, plan, plan)
+		if len(refused.Diagnostics.Errors()) != 1 || !strings.Contains(refused.Diagnostics.Errors()[0].Detail(), "deletes its data") {
+			t.Fatalf("%s: diagnostics = %v", name, refused.Diagnostics)
+		}
+		plan.AllowReplace = types.BoolValue(true)
+		if allowed := modifyDedicatedPlan(t, state, plan, plan); allowed.Diagnostics.HasError() {
+			t.Fatalf("%s with allow_replace: diagnostics = %v", name, allowed.Diagnostics)
+		}
+	}
+
+	unknownName := state
+	unknownName.DatabaseName = types.StringUnknown()
+	if pending := modifyDedicatedPlan(t, state, unknownName, unknownName); len(pending.Diagnostics.Errors()) != 1 {
+		t.Fatalf("diagnostics = %v", pending.Diagnostics)
+	}
+
+	noUser := state
+	noUser.MasterUsername = types.StringNull()
+	configured := noUser
+	configured.MasterUsername = types.StringValue("app_owner")
+	if adopted := modifyDedicatedPlan(t, noUser, configured, configured); adopted.Diagnostics.HasError() {
+		t.Fatalf("a username the API never reported doesn't replace the database: %v", adopted.Diagnostics)
 	}
 }

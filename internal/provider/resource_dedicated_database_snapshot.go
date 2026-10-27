@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -54,8 +55,8 @@ func (r *dedicatedDatabaseSnapshotResource) Schema(ctx context.Context, _ resour
 			"database_id": schema.StringAttribute{Required: true, PlanModifiers: replaceString()},
 			"name":        schema.StringAttribute{Optional: true, PlanModifiers: replaceString(), Description: "Up to 100 characters. Changing this replaces the snapshot."},
 			"kind":        schema.StringAttribute{Computed: true, PlanModifiers: keep},
-			"status":      schema.StringAttribute{Computed: true},
-			"size_bytes":  schema.Int64Attribute{Computed: true},
+			"status":      schema.StringAttribute{Computed: true, PlanModifiers: keep},
+			"size_bytes":  schema.Int64Attribute{Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()}},
 			"created_at":  schema.StringAttribute{Computed: true, PlanModifiers: keep},
 			"timeouts":    timeouts.Attributes(ctx, timeouts.Opts{Create: true, Delete: true}),
 		},
@@ -77,8 +78,10 @@ func (r *dedicatedDatabaseSnapshotResource) Create(ctx context.Context, req reso
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, createTimeout)
+	defer cancel()
 	databaseID := plan.DatabaseID.ValueString()
-	if err := waitDedicatedRunning(ctx, r.client, databaseID, createTimeout); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, databaseID); err != nil {
 		resp.Diagnostics.AddError("The database isn't ready for a snapshot", dedicatedErrorDetail(err))
 		return
 	}
@@ -89,7 +92,7 @@ func (r *dedicatedDatabaseSnapshotResource) Create(ctx context.Context, req reso
 	}
 	plan.apply(snapshot)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	err = pollDedicated(ctx, createTimeout, func(ctx context.Context) (bool, error) {
+	err = pollDedicated(ctx, func(ctx context.Context) (bool, error) {
 		current, err := r.client.GetDedicatedSnapshot(ctx, databaseID, snapshot.ID)
 		if err != nil {
 			return false, err
@@ -149,12 +152,14 @@ func (r *dedicatedDatabaseSnapshotResource) Delete(ctx context.Context, req reso
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, deleteTimeout)
+	defer cancel()
 	databaseID, id := state.DatabaseID.ValueString(), state.ID.ValueString()
 	if err := r.client.DeleteDedicatedSnapshot(ctx, databaseID, id); err != nil {
 		resp.Diagnostics.AddError("Delete StackShift snapshot failed", dedicatedErrorDetail(err))
 		return
 	}
-	err := pollDedicated(ctx, deleteTimeout, func(ctx context.Context) (bool, error) {
+	err := pollDedicated(ctx, func(ctx context.Context) (bool, error) {
 		_, err := r.client.GetDedicatedSnapshot(ctx, databaseID, id)
 		if notFound(err) {
 			return true, nil

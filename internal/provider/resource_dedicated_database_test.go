@@ -67,6 +67,11 @@ type fakeDedicatedAPI struct {
 	billingPuts     []map[string]any
 	restoreBody     map[string]any
 	management      managementState
+	neverRuns       bool
+	failOnStart     bool
+	replicaReads    int
+	classApply      string
+	sizeReads       int
 	becomesRunning  bool
 	runningReads    int
 	deleting        bool
@@ -149,7 +154,7 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "POST /databases":
 		f.created, f.createBody, f.class = true, body, body["instance_class"].(string)
 		f.createCount++
-		f.deleting, f.deleted, f.deleteReads, f.runningReads, f.becomesRunning = false, false, 0, 0, !f.paymentRequired
+		f.deleting, f.deleted, f.deleteReads, f.runningReads, f.becomesRunning = false, false, 0, 0, !f.paymentRequired && !f.neverRuns
 		f.engine, f.version = body["type"].(string), "17"
 		if f.engine == "mysql" {
 			f.version = "8.4"
@@ -180,6 +185,9 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.becomesRunning {
 			if f.runningReads++; f.runningReads >= 2 {
 				f.status, f.becomesRunning = "running", false
+				if f.failOnStart {
+					f.status = "failed"
+				}
 			}
 		}
 		writeOK(w, http.StatusOK, f.database())
@@ -218,19 +226,37 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.status != "pending_payment" {
 			members = append(members, map[string]any{"id": "inst-1", "role": "primary", "instance_class": f.class, "status": "running", "site": "hel1"})
 		}
+		for _, replica := range f.replicas {
+			if replica["status"] == "provisioning" {
+				if f.replicaReads++; f.replicaReads >= 2 {
+					replica["status"] = "running"
+				}
+			}
+		}
 		members = append(members, f.replicas...)
 		ha := map[string]any{"standby_mode": "off", "on_standby_loss": "degrade", "standby_available": true, "members": members}
 		if f.pendingClass != "" {
-			ha["size_change"] = map[string]any{"id": "chg-1", "from_class": f.class, "to_class": f.pendingClass, "status": "scheduled"}
+			status := "scheduled"
+			if f.classApply == "now" {
+				if f.sizeReads++; f.sizeReads >= 2 {
+					f.class, f.pendingClass = f.pendingClass, ""
+				} else {
+					status = "adding"
+				}
+			}
+			if f.pendingClass != "" {
+				ha["size_change"] = map[string]any{"id": "chg-1", "from_class": f.class, "to_class": f.pendingClass, "status": status}
+			}
 		}
 		writeOK(w, http.StatusOK, ha)
 	case "POST /databases/db-1/class":
 		if f.paid(w, body, "class") {
-			f.pendingClass = body["instance_class"].(string)
+			f.pendingClass, f.classApply, f.sizeReads = body["instance_class"].(string), body["apply"].(string), 0
 			writeOK(w, http.StatusAccepted, map[string]any{"message": "scheduled"})
 		}
 	case "POST /databases/db-1/replicas":
 		if f.paid(w, body, "replica") {
+			f.replicaReads = 0
 			f.replicas = append(f.replicas, map[string]any{"id": "rep-1", "role": "replica", "instance_class": "s-2vcpu-4gb", "status": "provisioning", "site": "hel1"})
 			writeOK(w, http.StatusAccepted, map[string]any{"replica_id": "rep-1", "instance_class": "s-2vcpu-4gb"})
 		}
@@ -456,6 +482,7 @@ func TestDedicatedDatabaseCreatePaymentRequiredWarningHasCheckoutURL(t *testing.
 }
 
 func TestDedicatedDatabaseReplicaAddAndRemove(t *testing.T) {
+	fastPolling(t)
 	fake := &fakeDedicatedAPI{created: true, status: "running", class: "s-2vcpu-4gb", walletEmpty: true}
 	startFakeDedicatedAPI(t, fake)
 	name := "stackshift_dedicated_database_replica.read"
@@ -484,7 +511,7 @@ resource "stackshift_dedicated_database_replica" "read" {
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(name, "id", "rep-1"),
 					resource.TestCheckResourceAttr(name, "instance_class", "s-2vcpu-4gb"),
-					resource.TestCheckResourceAttr(name, "status", "provisioning"),
+					resource.TestCheckResourceAttr(name, "status", "running"),
 					resource.TestCheckResourceAttr(name, "site", "hel1"),
 				),
 			},

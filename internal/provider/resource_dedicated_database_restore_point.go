@@ -8,6 +8,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -54,9 +55,9 @@ func (r *dedicatedDatabaseRestorePointResource) Schema(ctx context.Context, _ re
 			"database_id": schema.StringAttribute{Required: true, PlanModifiers: replaceString()},
 			"name":        schema.StringAttribute{Optional: true, PlanModifiers: replaceString(), Description: "Up to 100 characters. Changing this replaces the restore point."},
 			"kind":        schema.StringAttribute{Computed: true, PlanModifiers: keep},
-			"status":      schema.StringAttribute{Computed: true},
-			"size_gb":     schema.Int64Attribute{Computed: true},
-			"taken_at":    schema.StringAttribute{Computed: true},
+			"status":      schema.StringAttribute{Computed: true, PlanModifiers: keep},
+			"size_gb":     schema.Int64Attribute{Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()}},
+			"taken_at":    schema.StringAttribute{Computed: true, PlanModifiers: keep},
 			"timeouts":    timeouts.Attributes(ctx, timeouts.Opts{Create: true, Delete: true}),
 		},
 	}
@@ -90,8 +91,10 @@ func (r *dedicatedDatabaseRestorePointResource) Create(ctx context.Context, req 
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, createTimeout)
+	defer cancel()
 	databaseID := plan.DatabaseID.ValueString()
-	if err := waitDedicatedRunning(ctx, r.client, databaseID, createTimeout); err != nil {
+	if err := waitDedicatedRunning(ctx, r.client, databaseID); err != nil {
 		resp.Diagnostics.AddError("The database isn't ready for a restore point", dedicatedErrorDetail(err))
 		return
 	}
@@ -102,7 +105,7 @@ func (r *dedicatedDatabaseRestorePointResource) Create(ctx context.Context, req 
 	}
 	plan.apply(point)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
-	err = pollDedicated(ctx, createTimeout, func(ctx context.Context) (bool, error) {
+	err = pollDedicated(ctx, func(ctx context.Context) (bool, error) {
 		current, err := r.find(ctx, databaseID, point.ID)
 		if err != nil {
 			return false, err
@@ -162,12 +165,14 @@ func (r *dedicatedDatabaseRestorePointResource) Delete(ctx context.Context, req 
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, deleteTimeout)
+	defer cancel()
 	databaseID, id := state.DatabaseID.ValueString(), state.ID.ValueString()
 	if err := r.client.DeleteDedicatedRestorePoint(ctx, databaseID, id); err != nil {
 		resp.Diagnostics.AddError("Delete StackShift restore point failed", dedicatedErrorDetail(err))
 		return
 	}
-	err := pollDedicated(ctx, deleteTimeout, func(ctx context.Context) (bool, error) {
+	err := pollDedicated(ctx, func(ctx context.Context) (bool, error) {
 		point, err := r.find(ctx, databaseID, id)
 		if notFound(err) || err == nil && point.Status == "deleted" {
 			return true, nil

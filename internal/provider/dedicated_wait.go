@@ -17,13 +17,20 @@ var dedicatedPollInterval = 5 * time.Second
 
 const dedicatedWaitLimit = 45 * time.Minute
 
+type dedicatedFailedError struct{}
+
+func (dedicatedFailedError) Error() string {
+	return "StackShift reports that the database failed to start."
+}
+
 func tlsFailure(err error) bool {
+	var alert tls.AlertError
 	var unknownAuthority x509.UnknownAuthorityError
 	var invalidCertificate x509.CertificateInvalidError
 	var wrongHostname x509.HostnameError
 	var recordHeader tls.RecordHeaderError
 	var verification *tls.CertificateVerificationError
-	return errors.As(err, &unknownAuthority) || errors.As(err, &invalidCertificate) || errors.As(err, &wrongHostname) ||
+	return errors.As(err, &alert) || errors.As(err, &unknownAuthority) || errors.As(err, &invalidCertificate) || errors.As(err, &wrongHostname) ||
 		errors.As(err, &recordHeader) || errors.As(err, &verification)
 }
 
@@ -47,9 +54,7 @@ func pollDelay(err error) time.Duration {
 	return dedicatedPollInterval
 }
 
-func pollDedicated(ctx context.Context, timeout time.Duration, done func(context.Context) (bool, error)) error {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+func pollDedicated(ctx context.Context, done func(context.Context) (bool, error)) error {
 	var lastErr error
 	for {
 		finished, err := done(ctx)
@@ -81,14 +86,14 @@ func pollDedicated(ctx context.Context, timeout time.Duration, done func(context
 
 func dedicatedTransitional(status string) bool {
 	switch status {
-	case "provisioning", "starting", "restarting", "restoring":
+	case "provisioning", "starting", "restarting", "restoring", "stopping", "cloning", "private_pending", "rolling_back":
 		return true
 	}
 	return false
 }
 
-func waitDedicatedRunning(ctx context.Context, api *client.Client, id string, timeout time.Duration) error {
-	return pollDedicated(ctx, timeout, func(ctx context.Context) (bool, error) {
+func waitDedicatedRunning(ctx context.Context, api *client.Client, id string) error {
+	return pollDedicated(ctx, func(ctx context.Context) (bool, error) {
 		db, err := api.GetDedicatedDatabase(ctx, id)
 		if err != nil {
 			return false, err
@@ -98,6 +103,9 @@ func waitDedicatedRunning(ctx context.Context, api *client.Client, id string, ti
 		}
 		if dedicatedTransitional(db.Status) {
 			return false, nil
+		}
+		if db.Status == "failed" {
+			return false, dedicatedFailedError{}
 		}
 		return false, &client.DedicatedError{StatusCode: http.StatusConflict, Message: "The database is " + db.Status + ", so it can't take this change yet."}
 	})

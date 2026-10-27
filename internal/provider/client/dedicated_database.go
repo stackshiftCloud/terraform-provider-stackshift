@@ -182,16 +182,28 @@ type DedicatedError struct {
 	RetryAfter  time.Duration
 }
 
+const maxRetryAfter = 24 * time.Hour
+
 func parseRetryAfter(value string, now time.Time) time.Duration {
 	value = strings.TrimSpace(value)
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
-		if seconds < 0 {
+	seconds, err := strconv.ParseInt(value, 10, 64)
+	if errors.Is(err, strconv.ErrRange) {
+		if strings.HasPrefix(value, "-") {
 			return 0
+		}
+		return maxRetryAfter
+	}
+	if err == nil {
+		switch {
+		case seconds < 0:
+			return 0
+		case seconds > int64(maxRetryAfter/time.Second):
+			return maxRetryAfter
 		}
 		return time.Duration(seconds) * time.Second
 	}
 	if at, err := http.ParseTime(value); err == nil && at.After(now) {
-		return at.Sub(now)
+		return min(at.Sub(now), maxRetryAfter)
 	}
 	return 0
 }
