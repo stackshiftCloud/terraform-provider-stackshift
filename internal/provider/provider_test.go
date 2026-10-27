@@ -48,7 +48,41 @@ func TestProviderRegistersMailInfrastructureResources(t *testing.T) {
 	}
 }
 
-var testAccProtoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServer, error){
+func TestProviderSchemaLoadsInTerraform(t *testing.T) {
+	t.Parallel()
+
+	server, err := providerserver.NewProtocol6WithError(New())()
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := server.GetProviderSchema(context.Background(), &tfprotov6.GetProviderSchemaRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, diagnostic := range response.Diagnostics {
+		if diagnostic.Severity == tfprotov6.DiagnosticSeverityError {
+			t.Errorf("%s: %s", diagnostic.Summary, diagnostic.Detail)
+		}
+	}
+	for _, name := range []string{"stackshift_byoc_provider_connection", "stackshift_byoc_node", "stackshift_byoc_volume", "stackshift_byoc_snapshot"} {
+		resource, ok := response.ResourceSchemas[name]
+		if !ok {
+			t.Fatalf("%s schema missing", name)
+		}
+		found := false
+		for _, attribute := range resource.Block.Attributes {
+			if attribute.Name == "provider" {
+				t.Errorf("%s declares the reserved provider attribute", name)
+			}
+			found = found || attribute.Name == "cloud_provider"
+		}
+		if !found {
+			t.Errorf("%s has no cloud_provider attribute", name)
+		}
+	}
+}
+
+var testAccProtoV6ProviderFactories =map[string]func() (tfprotov6.ProviderServer, error){
 	"stackshift": providerserver.NewProtocol6WithError(New()),
 }
 

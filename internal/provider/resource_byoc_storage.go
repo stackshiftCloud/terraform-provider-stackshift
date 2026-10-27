@@ -30,7 +30,7 @@ type byocVolumeModel struct {
 	Filesystem           types.String `tfsdk:"filesystem"`
 	IdempotencyKey       types.String `tfsdk:"idempotency_key"`
 	DeleteIdempotencyKey types.String `tfsdk:"delete_idempotency_key"`
-	Provider             types.String `tfsdk:"provider"`
+	CloudProvider        types.String `tfsdk:"cloud_provider"`
 	ProviderVolumeID     types.String `tfsdk:"provider_volume_id"`
 	Region               types.String `tfsdk:"region"`
 	State                types.String `tfsdk:"state"`
@@ -57,7 +57,7 @@ func (r *byocVolumeResource) Schema(_ context.Context, _ resource.SchemaRequest,
 		"name": schema.StringAttribute{Required: true, PlanModifiers: replace}, "size_gb": schema.Int64Attribute{Required: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.RequiresReplace()}},
 		"mount_path": schema.StringAttribute{Optional: true, PlanModifiers: replace}, "filesystem": schema.StringAttribute{Optional: true, PlanModifiers: replace},
 		"idempotency_key": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replace}, "delete_idempotency_key": schema.StringAttribute{Computed: true},
-		"provider": schema.StringAttribute{Computed: true}, "provider_volume_id": schema.StringAttribute{Computed: true}, "region": schema.StringAttribute{Computed: true},
+		"cloud_provider": schema.StringAttribute{Computed: true}, "provider_volume_id": schema.StringAttribute{Computed: true}, "region": schema.StringAttribute{Computed: true},
 		"state": schema.StringAttribute{Computed: true}, "failure_reason": schema.StringAttribute{Computed: true}, "snapshot_count": schema.Int64Attribute{Computed: true},
 	}}
 }
@@ -193,7 +193,7 @@ func (m *byocVolumeModel) apply(v *client.BYOCVolume) {
 	m.SizeGB = types.Int64Value(v.SizeGB)
 	m.MountPath = optionalBYOCString(v.MountPath)
 	m.Filesystem = optionalBYOCString(v.Filesystem)
-	m.Provider = types.StringValue(v.Provider)
+	m.CloudProvider = types.StringValue(v.Provider)
 	m.ProviderVolumeID = optionalBYOCString(v.ProviderVolumeID)
 	m.Region = types.StringValue(v.Region)
 	m.State = types.StringValue(v.State)

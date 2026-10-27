@@ -100,7 +100,7 @@ terraform {
 resource "stackshift_project" "api" {
   name    = "example-api"
   runtime = "node"
-  region  = "us-east"
+  region  = "hel1"
   port    = 3000
 }
 

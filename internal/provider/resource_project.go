@@ -64,7 +64,7 @@ func (r *projectResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 			"id":                     schema.StringAttribute{Computed: true},
 			"name":                   schema.StringAttribute{Required: true},
 			"runtime":                schema.StringAttribute{Required: true},
-			"region":                 schema.StringAttribute{Required: true},
+			"region":                 schema.StringAttribute{Optional: true, Computed: true, MarkdownDescription: "Region id from `GET /api/v1/regions`, for example `hel1`. Leave it out to let StackShift choose. An app cannot move to another region after it is created.", PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown()}},
 			"port":                   schema.Int64Attribute{Optional: true, Computed: true, PlanModifiers: []planmodifier.Int64{int64planmodifier.UseStateForUnknown()}},
 			"description":            schema.StringAttribute{Optional: true},
 			"team_id":                schema.StringAttribute{Optional: true},

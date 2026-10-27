@@ -25,7 +25,7 @@ type byocNodeResource struct{ client *client.Client }
 type byocNodeModel struct {
 	ID                   types.String `tfsdk:"id"`
 	ProviderConnectionID types.String `tfsdk:"provider_connection_id"`
-	Provider             types.String `tfsdk:"provider"`
+	CloudProvider        types.String `tfsdk:"cloud_provider"`
 	Region               types.String `tfsdk:"region"`
 	TierSlug             types.String `tfsdk:"tier_slug"`
 	Name                 types.String `tfsdk:"name"`
@@ -60,7 +60,7 @@ func (r *byocNodeResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 	resp.Schema = schema.Schema{MarkdownDescription: "Provisions and safely deletes a durable BYOCloud node. Create and delete wait for their durable operations to reach a terminal provider-confirmed state.", Attributes: map[string]schema.Attribute{
 		"id":                     schema.StringAttribute{Computed: true},
 		"provider_connection_id": schema.StringAttribute{Required: true, PlanModifiers: replace},
-		"provider":               schema.StringAttribute{Required: true, PlanModifiers: replace},
+		"cloud_provider":         schema.StringAttribute{Required: true, PlanModifiers: replace},
 		"region":                 schema.StringAttribute{Required: true, PlanModifiers: replace},
 		"tier_slug":              schema.StringAttribute{Required: true, PlanModifiers: replace},
 		"name":                   schema.StringAttribute{Required: true, PlanModifiers: replace},
@@ -89,10 +89,10 @@ func (r *byocNodeResource) Create(ctx context.Context, req resource.CreateReques
 	}
 	key := strings.TrimSpace(plan.IdempotencyKey.ValueString())
 	if key == "" {
-		key = deterministicIdempotencyKey("tf-byoc-node-create", plan.ProviderConnectionID.ValueString(), plan.Provider.ValueString(), plan.Region.ValueString(), plan.TierSlug.ValueString(), plan.Name.ValueString())
+		key = deterministicIdempotencyKey("tf-byoc-node-create", plan.ProviderConnectionID.ValueString(), plan.CloudProvider.ValueString(), plan.Region.ValueString(), plan.TierSlug.ValueString(), plan.Name.ValueString())
 	}
 	node, operation, err := r.client.ProvisionBYOCNode(ctx, map[string]any{
-		"provider_connection_id": plan.ProviderConnectionID.ValueString(), "provider": plan.Provider.ValueString(),
+		"provider_connection_id": plan.ProviderConnectionID.ValueString(), "provider": plan.CloudProvider.ValueString(),
 		"region": plan.Region.ValueString(), "tier_slug": plan.TierSlug.ValueString(), "node_name": plan.Name.ValueString(),
 	}, key)
 	if err == nil {
@@ -166,7 +166,7 @@ func (r *byocNodeResource) ImportState(ctx context.Context, req resource.ImportS
 func (m *byocNodeModel) applyNode(node *client.BYOCNode) {
 	m.ID = types.StringValue(node.ID)
 	m.ProviderConnectionID = optionalBYOCString(node.ProviderConnectionID)
-	m.Provider = types.StringValue(node.Provider)
+	m.CloudProvider = types.StringValue(node.Provider)
 	m.Region = types.StringValue(node.Region)
 	m.TierSlug = optionalBYOCString(node.TierSlug)
 	m.Name = types.StringValue(node.Name)

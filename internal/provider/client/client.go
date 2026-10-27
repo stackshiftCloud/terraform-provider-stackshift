@@ -419,37 +419,41 @@ func (c *Client) GetDatabaseCredentials(ctx context.Context, id string) (*Databa
 	return &creds, err
 }
 
-func (c *Client) CreateProjectDomain(ctx context.Context, projectID, domain string) (*ProjectDomain, error) {
-	var data struct {
-		Domain ProjectDomain `json:"domain"`
-	}
-	err := c.do(ctx, http.MethodPost, "/projects/"+url.PathEscape(projectID)+"/domains", CreateDomainRequest{Domain: domain}, &data)
-	return &data.Domain, err
+func (c *Client) CreateProjectDomain(ctx context.Context, projectID, hostname string, isPrimary bool) (*ProjectDomain, error) {
+	var domain ProjectDomain
+	err := c.do(ctx, http.MethodPost, "/projects/"+url.PathEscape(projectID)+"/custom-domains/external", CreateDomainRequest{Hostname: hostname, IsPrimary: isPrimary}, &domain)
+	return &domain, err
 }
 
 func (c *Client) ListProjectDomains(ctx context.Context, projectID string) ([]ProjectDomain, error) {
 	var data struct {
 		Domains []ProjectDomain `json:"domains"`
 	}
-	err := c.do(ctx, http.MethodGet, "/projects/"+url.PathEscape(projectID)+"/domains", nil, &data)
+	err := c.do(ctx, http.MethodGet, "/projects/"+url.PathEscape(projectID)+"/custom-domains", nil, &data)
 	return data.Domains, err
 }
 
 func (c *Client) DeleteProjectDomain(ctx context.Context, projectID, domainID string) error {
-	err := c.do(ctx, http.MethodDelete, "/projects/"+url.PathEscape(projectID)+"/domains/"+url.PathEscape(domainID), nil, nil)
+	err := c.do(ctx, http.MethodDelete, "/projects/"+url.PathEscape(projectID)+"/custom-domains/"+url.PathEscape(domainID), nil, nil)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
 	return err
 }
 
-func (c *Client) VerifyProjectDomain(ctx context.Context, projectID, domainID string) error {
-	return c.do(ctx, http.MethodPost, "/projects/"+url.PathEscape(projectID)+"/domains/"+url.PathEscape(domainID)+"/verify", nil, nil)
+func (c *Client) SetProjectDomainPrimary(ctx context.Context, projectID, domainID string) error {
+	return c.do(ctx, http.MethodPost, "/projects/"+url.PathEscape(projectID)+"/custom-domains/"+url.PathEscape(domainID)+"/primary", nil, nil)
+}
+
+func (c *Client) VerifyProjectDomain(ctx context.Context, projectID, domainID string) (*ProjectDomain, error) {
+	var domain ProjectDomain
+	err := c.do(ctx, http.MethodPost, "/projects/"+url.PathEscape(projectID)+"/custom-domains/"+url.PathEscape(domainID)+"/verify", nil, &domain)
+	return &domain, err
 }
 
 func (c *Client) GetProjectDNSConfig(ctx context.Context, projectID string) (*DNSConfig, error) {
 	var cfg DNSConfig
-	err := c.do(ctx, http.MethodGet, "/projects/"+url.PathEscape(projectID)+"/domains/dns-config", nil, &cfg)
+	err := c.do(ctx, http.MethodGet, "/projects/"+url.PathEscape(projectID)+"/custom-domains/dns-config", nil, &cfg)
 	return &cfg, err
 }
 

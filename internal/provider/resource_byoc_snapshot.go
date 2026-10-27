@@ -22,7 +22,7 @@ type byocSnapshotModel struct {
 	Name                 types.String `tfsdk:"name"`
 	IdempotencyKey       types.String `tfsdk:"idempotency_key"`
 	DeleteIdempotencyKey types.String `tfsdk:"delete_idempotency_key"`
-	Provider             types.String `tfsdk:"provider"`
+	CloudProvider        types.String `tfsdk:"cloud_provider"`
 	ProviderSnapshotID   types.String `tfsdk:"provider_snapshot_id"`
 	SizeGB               types.Int64  `tfsdk:"size_gb"`
 	State                types.String `tfsdk:"state"`
@@ -45,7 +45,7 @@ func (r *byocSnapshotResource) Schema(_ context.Context, _ resource.SchemaReques
 		"id": schema.StringAttribute{Computed: true}, "node_id": schema.StringAttribute{Required: true, PlanModifiers: replace},
 		"volume_id": schema.StringAttribute{Required: true, PlanModifiers: replace}, "name": schema.StringAttribute{Required: true, PlanModifiers: replace},
 		"idempotency_key": schema.StringAttribute{Optional: true, Computed: true, PlanModifiers: replace}, "delete_idempotency_key": schema.StringAttribute{Computed: true},
-		"provider": schema.StringAttribute{Computed: true}, "provider_snapshot_id": schema.StringAttribute{Computed: true},
+		"cloud_provider": schema.StringAttribute{Computed: true}, "provider_snapshot_id": schema.StringAttribute{Computed: true},
 		"size_gb": schema.Int64Attribute{Computed: true}, "state": schema.StringAttribute{Computed: true}, "failure_reason": schema.StringAttribute{Computed: true},
 	}}
 }
@@ -155,7 +155,7 @@ func (m *byocSnapshotModel) apply(snapshot *client.BYOCSnapshot) {
 	m.NodeID = types.StringValue(snapshot.NodeID)
 	m.VolumeID = types.StringValue(snapshot.VolumeID)
 	m.Name = types.StringValue(snapshot.Name)
-	m.Provider = types.StringValue(snapshot.Provider)
+	m.CloudProvider = types.StringValue(snapshot.Provider)
 	m.ProviderSnapshotID = optionalBYOCString(snapshot.ProviderSnapshotID)
 	m.SizeGB = types.Int64Value(snapshot.SizeGB)
 	m.State = types.StringValue(snapshot.State)

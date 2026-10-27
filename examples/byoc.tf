@@ -21,14 +21,14 @@ variable "hetzner_token" {
 }
 
 resource "stackshift_byoc_provider_connection" "hetzner" {
-  provider     = "hetzner"
-  display_name = "Production Hetzner project"
-  token        = var.hetzner_token
+  cloud_provider = "hetzner"
+  display_name   = "Production Hetzner project"
+  token          = var.hetzner_token
 }
 
 resource "stackshift_byoc_node" "app" {
   provider_connection_id = stackshift_byoc_provider_connection.hetzner.id
-  provider               = "hetzner"
+  cloud_provider         = "hetzner"
   region                 = "fsn1"
   tier_slug              = "growth"
   name                   = "production-app-1"

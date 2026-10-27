@@ -28,7 +28,7 @@ type byocProviderConnectionResource struct{ client *client.Client }
 
 type byocProviderConnectionModel struct {
 	ID                  types.String `tfsdk:"id"`
-	Provider            types.String `tfsdk:"provider"`
+	CloudProvider       types.String `tfsdk:"cloud_provider"`
 	DisplayName         types.String `tfsdk:"display_name"`
 	Token               types.String `tfsdk:"token"`
 	RoleARN             types.String `tfsdk:"role_arn"`
@@ -60,7 +60,7 @@ func (r *byocProviderConnectionResource) Schema(_ context.Context, _ resource.Sc
 		MarkdownDescription: "Manages a clean-contract BYOCloud provider connection. Hetzner and DigitalOcean accept scoped tokens; AWS accepts only an assumed-role ARN; Azure accepts only workload-federation identity fields.",
 		Attributes: map[string]schema.Attribute{
 			"id":                    schema.StringAttribute{Computed: true},
-			"provider":              schema.StringAttribute{Required: true, PlanModifiers: replace},
+			"cloud_provider":        schema.StringAttribute{Required: true, PlanModifiers: replace},
 			"display_name":          schema.StringAttribute{Required: true},
 			"token":                 schema.StringAttribute{Optional: true, Sensitive: true, MarkdownDescription: "Scoped Hetzner or DigitalOcean token. Never use this attribute for AWS or Azure."},
 			"role_arn":              schema.StringAttribute{Optional: true, Sensitive: true, MarkdownDescription: "AWS IAM role ARN assumed by StackShift using the computed external_id."},
@@ -79,7 +79,7 @@ func (r *byocProviderConnectionResource) Schema(_ context.Context, _ resource.Sc
 }
 
 func (m byocProviderConnectionModel) request() (client.BYOCProviderConnectionRequest, error) {
-	provider := strings.ToLower(strings.TrimSpace(m.Provider.ValueString()))
+	provider := strings.ToLower(strings.TrimSpace(m.CloudProvider.ValueString()))
 	credentials := client.BYOCProviderConnectionCredential{
 		Token: strings.TrimSpace(m.Token.ValueString()), RoleARN: strings.TrimSpace(m.RoleARN.ValueString()), Region: strings.TrimSpace(m.Region.ValueString()),
 		AzureTenantID: strings.TrimSpace(m.AzureTenantID.ValueString()), AzureSubscriptionID: strings.TrimSpace(m.AzureSubscriptionID.ValueString()), AzureClientID: strings.TrimSpace(m.AzureClientID.ValueString()),
@@ -185,7 +185,7 @@ func (r *byocProviderConnectionResource) ImportState(ctx context.Context, req re
 func (m *byocProviderConnectionModel) apply(ctx context.Context, connection *client.BYOCProviderConnection) {
 	// Preserve secret input attributes while refreshing only server-owned fields.
 	m.ID = types.StringValue(connection.ID)
-	m.Provider = types.StringValue(connection.Provider)
+	m.CloudProvider = types.StringValue(connection.Provider)
 	m.DisplayName = types.StringValue(connection.DisplayName)
 	m.AuthType = types.StringValue(connection.AuthType)
 	m.ExternalID = optionalBYOCString(connection.ExternalID)

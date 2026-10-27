@@ -53,7 +53,7 @@ Normal StackShift-managed deployments do not require a node ID. Leave placement 
 | --- | --- | --- |
 | `name` | yes | Project display name. |
 | `runtime` | yes | Runtime identifier accepted by StackShift. |
-| `region` | yes | StackShift region. |
+| `region` | no | Region id from `GET /api/v1/regions` (or `stackshift project regions`), for example `hel1`. Leave it out to let StackShift choose. An app cannot move to another region after it is created. |
 | `port` | no | Application port. |
 | `description` | no | Project description. |
 | `team_id` | no | Team/workspace owner. |
@@ -107,8 +107,8 @@ Shape fields such as `project_id`, `type`, `version`, `size_gb`, and `target_nod
 | --- | --- | --- |
 | `project_id` | yes | Owning project ID. |
 | `name` | yes | Database name. |
-| `type` | yes | `postgres`, `mysql`, or `redis`. |
-| `version` | yes | Version accepted by StackShift. |
+| `type` | yes | `postgres`, `mysql`, `mariadb`, `clickhouse`, `redis` (Redis 8), or `valkey` (Valkey 9, Redis-compatible). |
+| `version` | yes | Version accepted by StackShift. For `redis` use `"8.10"`, for `valkey` use `"9.0"`; ClickHouse accepts `"26.8"` or `"26.3"`. |
 | `size_gb` | yes | Managed database disk size. |
 | `target_node_id` | no | Optional explicit node placement target. |
 
@@ -120,15 +120,30 @@ terraform import stackshift_database.postgres <database_id>
 
 ## `stackshift_domain`
 
-Maps an external/custom domain to a project.
+Connects a custom hostname to a project. The hostname serves the project once it is verified. Verification needs proof that the hostname belongs to this project: a CNAME to the project address (shown by `stackshift project-domain dns-config PROJECT`), or the TXT record in `verification_txt_name` and `verification_txt_value`. An A record alone is not enough because every project on a server shares that address. Root domains need the TXT record. A hostname that stays unverified for 7 days can be claimed by another project.
+
+Every hostname is its own resource. Connecting `example.com` does not serve `www.example.com`; add a second `stackshift_domain` for `www.example.com`. It verifies through the root domain's proof once the root domain is verified on the same project. A hostname can belong to only one project, and one used by a stack can't be connected to a project.
 
 ### Arguments
 
 | Name | Required | Notes |
 | --- | --- | --- |
 | `project_id` | yes | Replaces the resource if changed. |
-| `domain` | yes | Domain hostname to attach. |
-| `verify_on_create` | no | Queues StackShift verification after creation. |
+| `domain` | yes | Hostname to connect. Replaces the resource if changed. |
+| `primary` | no | Makes this the project's primary domain. Changing it updates the domain in place. A domain becomes primary only once verified; until then the next apply after verification makes it primary. If another domain becomes primary outside Terraform, the next apply makes this one primary again. |
+| `verify_on_create` | no | Checks DNS again after creation if the first check did not pass. |
+
+### Attributes
+
+| Name | Notes |
+| --- | --- |
+| `is_primary` | Whether the domain is the project's primary domain right now. |
+| `verification_status` | `pending`, `verified` or `failed`. |
+| `verified` | `true` once the hostname is proven to belong to the project. |
+| `verification_txt_name` | TXT record name that proves ownership. Empty once verified. |
+| `verification_txt_value` | TXT record value that proves ownership. Empty once verified. |
+| `ssl_status` | Certificate status for the hostname. |
+| `dns_warning` | Set when the hostname's DNS points at another project's address, with the record to fix. Empty otherwise. |
 
 ### Import
 
@@ -308,9 +323,9 @@ Manages a custom Assets delivery domain. Apply first with `verify = false`, publ
 
 Manages one clean-contract BYOCloud provider identity and validates it during apply by default.
 
-- `provider = "hetzner"` or `"digitalocean"` requires `token`. Use a provider-scoped read/write token.
-- `provider = "aws"` requires `role_arn` and `region`. StackShift returns `external_id`; put that exact value in the IAM role trust policy. AWS access keys are not accepted.
-- `provider = "azure"` requires `azure_tenant_id`, `azure_subscription_id`, and `azure_client_id`. Configure the issuer, subject, and audience returned by StackShift on the Azure federated credential. Client secrets are not accepted.
+- `cloud_provider = "hetzner"` or `"digitalocean"` requires `token`. Use a provider-scoped read/write token.
+- `cloud_provider = "aws"` requires `role_arn` and `region`. StackShift returns `external_id`; put that exact value in the IAM role trust policy. AWS access keys are not accepted.
+- `cloud_provider = "azure"` requires `azure_tenant_id`, `azure_subscription_id`, and `azure_client_id`. Configure the issuer, subject, and audience returned by StackShift on the Azure federated credential. Client secrets are not accepted.
 - `missing_permissions` contains the exact failed permission checks when validation fails.
 
 Provider credentials are sensitive but remain Terraform inputs, so protect remote state with encryption and strict access control. Imported connections can be read without credentials, but credentials must be supplied before changing or revalidating them.
@@ -319,7 +334,7 @@ Provider credentials are sensitive but remain Terraform inputs, so protect remot
 
 Provisions a provider-backed node and waits for the durable provisioning operation to become `active`. The provider resource is discovered by StackShift tags after ambiguous provider responses, so a repeated apply with the same state does not create a duplicate instance. Destroy starts the durable deletion saga and waits until the provider confirms deletion. A `409` deletion blocker is returned to Terraform when projects, stacks, databases, volumes, or dependent snapshots remain.
 
-Required fields are `provider_connection_id`, `provider`, `region`, `tier_slug`, and `name`. When omitted, `idempotency_key` is deterministically derived from the immutable resource identity and then persisted, so a Terraform process crash cannot turn a retry into a second provider resource. Read-only fields expose operation progress, bootstrap state, enrollment state, overlay address, public address, and failure details.
+Required fields are `provider_connection_id`, `cloud_provider`, `region`, `tier_slug`, and `name`. When omitted, `idempotency_key` is deterministically derived from the immutable resource identity and then persisted, so a Terraform process crash cannot turn a retry into a second provider resource. Read-only fields expose operation progress, bootstrap state, enrollment state, overlay address, public address, and failure details.
 
 ## `stackshift_byoc_volume`
 
