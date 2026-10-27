@@ -301,19 +301,32 @@ type DatabaseCredentials struct {
 }
 
 type ProjectDomain struct {
-	ID                string    `json:"id"`
-	ProjectID         string    `json:"project_id,omitempty"`
-	Domain            string    `json:"domain"`
-	VerificationToken *string   `json:"verification_token,omitempty"`
-	Verified          bool      `json:"verified"`
-	SSLStatus         string    `json:"ssl_status,omitempty"`
-	IsPrimary         bool      `json:"is_primary,omitempty"`
-	CreatedAt         time.Time `json:"created_at,omitempty"`
-	UpdatedAt         time.Time `json:"updated_at,omitempty"`
+	ID                 string                           `json:"id"`
+	ProjectID          string                           `json:"project_id,omitempty"`
+	Hostname           string                           `json:"hostname"`
+	VerificationStatus string                           `json:"verification_status"`
+	SSLStatus          string                           `json:"ssl_status,omitempty"`
+	IsPrimary          bool                             `json:"is_primary,omitempty"`
+	VerificationRecord *ProjectDomainVerificationRecord `json:"verification_record,omitempty"`
+	DNSWarning         *ProjectDomainDNSWarning         `json:"dns_warning,omitempty"`
+	CreatedAt          time.Time                        `json:"created_at,omitempty"`
+	UpdatedAt          time.Time                        `json:"updated_at,omitempty"`
+}
+
+type ProjectDomainDNSWarning struct {
+	Message string `json:"message"`
+}
+
+type ProjectDomainVerificationRecord struct {
+	Type  string `json:"type"`
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type CreateDomainRequest struct {
-	Domain string `json:"domain"`
+	Hostname   string `json:"hostname"`
+	IsPrimary  bool   `json:"is_primary"`
+	IncludeWWW bool   `json:"include_www"`
 }
 
 type DNSConfig struct {

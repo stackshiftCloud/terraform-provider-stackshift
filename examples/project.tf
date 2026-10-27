@@ -1,7 +1,7 @@
 resource "stackshift_project" "api" {
   name    = "example-api"
   runtime = "node"
-  region  = "us-east"
+  region  = "hel1"
   port    = 3000
 
   github_repo_url        = "https://github.com/example/example-api"

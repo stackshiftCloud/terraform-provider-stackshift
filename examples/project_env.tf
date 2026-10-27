@@ -7,3 +7,8 @@ resource "stackshift_project_env" "production" {
     API_KEY  = var.api_key
   }
 }
+
+variable "api_key" {
+  type      = string
+  sensitive = true
+}
