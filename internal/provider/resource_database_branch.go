@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/objectplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -31,20 +32,22 @@ func NewDatabaseBranchResource() resource.Resource { return &databaseBranchResou
 type databaseBranchResource struct{ client *client.Client }
 
 type databaseBranchModel struct {
-	ID                types.String   `tfsdk:"id"`
-	DatabaseID        types.String   `tfsdk:"database_id"`
-	Name              types.String   `tfsdk:"name"`
-	From              types.Object   `tfsdk:"from"`
-	TTL               types.String   `tfsdk:"ttl"`
-	SleepAfterMinutes types.Int64    `tfsdk:"sleep_after_minutes"`
-	SourceRef         types.String   `tfsdk:"source_ref"`
-	ExpiresAt         types.String   `tfsdk:"expires_at"`
-	RootDatabaseID    types.String   `tfsdk:"root_database_id"`
-	Mechanism         types.String   `tfsdk:"mechanism"`
-	State             types.String   `tfsdk:"state"`
-	PrivateHostname   types.String   `tfsdk:"private_hostname"`
-	BranchedAt        types.String   `tfsdk:"branched_at"`
-	Timeouts          timeouts.Value `tfsdk:"timeouts"`
+	ID                 types.String   `tfsdk:"id"`
+	DatabaseID         types.String   `tfsdk:"database_id"`
+	Name               types.String   `tfsdk:"name"`
+	From               types.Object   `tfsdk:"from"`
+	TTL                types.String   `tfsdk:"ttl"`
+	AcceptPriceChanges types.Bool     `tfsdk:"accept_price_changes"`
+	InstanceClass      types.String   `tfsdk:"instance_class"`
+	SleepAfterMinutes  types.Int64    `tfsdk:"sleep_after_minutes"`
+	SourceRef          types.String   `tfsdk:"source_ref"`
+	ExpiresAt          types.String   `tfsdk:"expires_at"`
+	RootDatabaseID     types.String   `tfsdk:"root_database_id"`
+	Mechanism          types.String   `tfsdk:"mechanism"`
+	State              types.String   `tfsdk:"state"`
+	PrivateHostname    types.String   `tfsdk:"private_hostname"`
+	BranchedAt         types.String   `tfsdk:"branched_at"`
+	Timeouts           timeouts.Value `tfsdk:"timeouts"`
 }
 
 type databaseBranchFromModel struct {
@@ -91,6 +94,11 @@ func (r *databaseBranchResource) Schema(ctx context.Context, _ resource.SchemaRe
 			},
 			"ttl": schema.StringAttribute{Optional: true,
 				Description: "How long the branch lives before StackShift deletes it, such as 24h or 7d, or never. Leave it out for the plan's default. Removing it after it was set changes the branch to never. Changes in place."},
+			"instance_class": schema.StringAttribute{Optional: true, Computed: true,
+				PlanModifiers: []planmodifier.String{stringplanmodifier.UseStateForUnknown(), stringplanmodifier.RequiresReplaceIfConfigured()},
+				Description:   "For a branch of a Dedicated database: the size the branch is built and priced at, a slug from stackshift_database_instance_classes. Leave it out to use the parent's size. Empty for branches of Starter databases. Changing it replaces the branch."},
+			"accept_price_changes": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
+				Description: "Allow a branch of a Dedicated database, which costs extra, to be charged to the wallet. When false, creating one stops with the quote. Branches of Starter databases are never charged. Only used when the branch is created."},
 			"expires_at":          schema.StringAttribute{Computed: true, Description: "When the branch is deleted. Empty when it never expires."},
 			"sleep_after_minutes": sleepAfterMinutesAttribute("Sleep when idle for the branch: it sleeps after this many minutes without use, 5 to 1440, and wakes on the next connection. Leave it out or set 0 to keep the branch awake. Changes in place."),
 			"source_ref": schema.StringAttribute{Optional: true, PlanModifiers: replaceString(),
@@ -116,6 +124,9 @@ func (r *databaseBranchResource) ModifyPlan(ctx context.Context, req resource.Mo
 		return
 	}
 	plan.State, plan.ExpiresAt = state.State, state.ExpiresAt
+	if plan.InstanceClass.IsUnknown() {
+		plan.InstanceClass = state.InstanceClass
+	}
 	unchanged := resp.Plan
 	resp.Diagnostics.Append(unchanged.Set(ctx, &plan)...)
 	if !resp.Diagnostics.HasError() && unchanged.Raw.Equal(req.State.Raw) {
@@ -193,12 +204,18 @@ func (r *databaseBranchResource) Create(ctx context.Context, req resource.Create
 	ctx, cancel := context.WithTimeout(ctx, createTimeout)
 	defer cancel()
 	parentID := plan.DatabaseID.ValueString()
-	op, err := r.client.CreateDatabaseBranch(ctx, parentID, client.CreateDatabaseBranchRequest{
+	request := client.CreateDatabaseBranchRequest{
 		Name: plan.Name.ValueString(), From: plan.fromRequest(), TTL: plannedString(plan.TTL),
 		SleepAfterMinutes: plannedInt64(plan.SleepAfterMinutes), SourceRef: plannedString(plan.SourceRef),
-	})
-	if err != nil {
-		resp.Diagnostics.AddError("Create StackShift database branch failed", err.Error())
+		InstanceClass: plannedString(plan.InstanceClass),
+	}
+	var op *client.DatabaseBranchOperation
+	if !paidChange(&resp.Diagnostics, "new branch", plan.AcceptPriceChanges.ValueBool(), func(confirm *int64) error {
+		request.ConfirmChargeMinor = confirm
+		var err error
+		op, err = r.client.CreateDatabaseBranch(ctx, parentID, request)
+		return err
+	}) {
 		return
 	}
 	if op.Branch == nil || op.Branch.ID == "" {
@@ -301,6 +318,10 @@ func (r *databaseBranchResource) Read(ctx context.Context, req resource.ReadRequ
 	state.applyBranch(branch)
 	state.Name = types.StringValue(branch.Name)
 	state.SourceRef = stringValue(branch.SourceRef)
+	state.InstanceClass = types.StringNull()
+	if settings := branchDedicated(branch); settings != nil {
+		state.InstanceClass = nonEmptyString(settings.InstanceClass)
+	}
 	state.SleepAfterMinutes = sleepAfterMinutes(state.SleepAfterMinutes, branchSleep(branch))
 	if state.From.IsNull() || !branchFromMatches(state.From, branch.Source) {
 		state.From = branchFromValue(branch.Source)
@@ -378,6 +399,7 @@ func (r *databaseBranchResource) ImportState(ctx context.Context, req resource.I
 	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("database_id"), parts[0])...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), parts[1])...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("accept_price_changes"), false)...)
 }
 
 func (m *databaseBranchModel) applyBranch(branch *client.DatabaseBranch) {
@@ -391,9 +413,22 @@ func (m *databaseBranchModel) applyBranch(branch *client.DatabaseBranch) {
 	if branch.Database != nil {
 		m.PrivateHostname = nonEmptyString(branch.Database.PrivateHostname)
 	}
+	if m.InstanceClass.IsUnknown() {
+		m.InstanceClass = types.StringNull()
+		if settings := branchDedicated(branch); settings != nil {
+			m.InstanceClass = nonEmptyString(settings.InstanceClass)
+		}
+	}
 	if m.From.IsUnknown() {
 		m.From = branchFromValue(branch.Source)
 	}
+}
+
+func branchDedicated(branch *client.DatabaseBranch) *client.DedicatedSettings {
+	if branch.Database == nil {
+		return nil
+	}
+	return branch.Database.Dedicated
 }
 
 func branchSleep(branch *client.DatabaseBranch) *client.DatabaseSleep {

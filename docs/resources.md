@@ -137,11 +137,17 @@ Creating a branch waits until the branch is ready, and deleting it waits until i
 | `ttl` | no | How long the branch lives before StackShift deletes it, such as `24h` or `7d`, or `never`. Leave it out for the plan's default. Changes in place; removing it after it was set changes the branch to `never`. |
 | `sleep_after_minutes` | no | Sleep when idle for the branch, 5 to 1440 minutes. Leave it out or set `0` to keep it awake. Changes in place. |
 | `source_ref` | no | A label that says what the branch is for, such as `pr:142`. **Changing it replaces the branch.** |
+| `instance_class` | no | For a branch of a Dedicated database: the size the branch is built and priced at, a slug from `stackshift_database_instance_classes`. Leave it out to use the parent's size. Branches of Starter databases have no size of their own and it stays empty. **Changing it replaces the branch.** |
+| `accept_price_changes` | no | Defaults to `false`. A branch of a Dedicated database costs extra; see paid branches below. Only used when the branch is created. Import sets it to `false`. |
 | `timeouts` | no | `create` and `delete` durations, each 45 minutes by default. |
 
-Computed attributes: `id` (the branch's own database ID), `root_database_id` (the main database it descends from), `mechanism` (`instant`, `copy`, `point_in_time` or `backup`), `state` (`creating`, `ready`, `resetting`, `promoting`, `failed`, `deleting` or `needs_recovery`), `private_hostname`, `branched_at` and `expires_at` (empty when the branch never expires).
+Computed attributes: `id` (the branch's own database ID), `instance_class` (when left out), `root_database_id` (the main database it descends from), `mechanism` (`instant`, `copy`, `point_in_time` or `backup`), `state` (`creating`, `ready`, `resetting`, `promoting`, `failed`, `deleting` or `needs_recovery`), `private_hostname`, `branched_at` and `expires_at` (empty when the branch never expires).
 
 Making a branch the main database and resetting a branch are not Terraform actions. Do them from the dashboard or the API.
+
+### Paid branches
+
+Branches of Starter databases are never charged. A branch of a Dedicated database is: StackShift answers the first create with a quote. With `accept_price_changes = false` the apply stops and shows the charge, the new monthly price and the currency. Set `accept_price_changes = true` and apply again; the provider then confirms the quoted charge, takes it from the wallet and adds a warning with the amount. If the wallet doesn't cover it, or the parent database's plan is unpaid, the apply stops and says so. Prices: https://stackshift.cloud/pricing
 
 ### Connecting to a branch
 

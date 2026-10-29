@@ -889,7 +889,7 @@ func dedicatedErrorDetail(err error) string {
 	switch {
 	case apiErr.StatusCode == http.StatusForbidden:
 		return apiErr.Message + "\n\nDedicated databases must be switched on for your account. Contact StackShift support to turn them on."
-	case apiErr.PaymentRequired():
+	case apiErr.PaymentRequired() && apiErr.Code != "plan_limit":
 		detail := "Your wallet doesn't cover this change. Top up your wallet, then run terraform apply again."
 		if apiErr.AmountMinor > 0 {
 			detail = fmt.Sprintf("Your wallet doesn't cover this change (%s). Top up your wallet, then run terraform apply again.",

@@ -40,6 +40,9 @@ type fakeBranchAPI struct {
 	exists      bool
 	gone        bool
 	failCreate  bool
+	priced      bool
+	class       string
+	attempts    []map[string]any
 	createReads int
 	deleteReads int
 	deleteCalls int
@@ -65,6 +68,9 @@ func (f *fakeBranchAPI) branch() map[string]any {
 		"id": "br-1", "name": f.name, "parent_database_id": "db-1", "root_database_id": "db-1", "depth": 1, "mechanism": "instant",
 		"source": f.source, "state": f.state, "branched_at": "2026-10-29T10:00:00Z",
 		"database": map[string]any{"id": "br-1", "private_hostname": "br-1.db.stackshift.internal", "sleep": sleep},
+	}
+	if f.priced {
+		branch["database"].(map[string]any)["dedicated"] = map[string]any{"instance_class": f.class}
 	}
 	if f.sourceRef != nil {
 		branch["source_ref"] = f.sourceRef
@@ -98,7 +104,18 @@ func (f *fakeBranchAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	route := r.Method + " " + strings.TrimPrefix(r.URL.Path, "/api/v1")
 	switch route {
 	case "POST /databases/db-1/branches":
+		f.attempts = append(f.attempts, body)
+		if confirm, _ := body["confirm_charge_minor"].(float64); f.priced && int64(confirm) < fakeChargeMinor {
+			writeJSON(w, http.StatusConflict, map[string]any{"success": false, "message": "This branch costs extra.",
+				"error": map[string]any{"code": "price_confirmation_required"},
+				"quote": map[string]any{"current_monthly_minor": 900000, "new_monthly_minor": 1050000, "charge_minor": fakeChargeMinor, "credit_minor": 0, "currency": "NGN", "billing": "monthly"}})
+			return
+		}
 		f.exists, f.gone, f.createReads, f.createBody = true, false, 0, body
+		f.class = "s-2vcpu-4gb"
+		if requested, ok := body["instance_class"].(string); ok {
+			f.class = requested
+		}
 		f.name, f.state, f.sleep, f.expiresAt, f.sourceRef = body["name"].(string), "creating", nil, nil, body["source_ref"]
 		f.source = map[string]any{"kind": "now"}
 		switch from := body["from"].(type) {
@@ -278,6 +295,52 @@ func TestDatabaseBranchCreateUpdateImportAndDelete(t *testing.T) {
 			{
 				ResourceName: name, ImportState: true, ImportStateId: "db-1/br-1", ImportStateVerify: true,
 				ImportStateVerifyIgnore: []string{"ttl"},
+			},
+		},
+	})
+}
+
+func TestDatabaseBranchOfDedicatedDatabaseNeedsAcceptedPrice(t *testing.T) {
+	fastPolling(t)
+	fake := &fakeBranchAPI{priced: true}
+	startFakeBranchAPI(t, fake)
+	name := "stackshift_database_branch.fix"
+	resource.UnitTest(t, resource.TestCase{
+		ProtoV6ProviderFactories: databaseBranchFactories,
+		CheckDestroy: func(*terraform.State) error {
+			if !fake.gone || fake.deleteCalls != 2 {
+				return fmt.Errorf("delete calls = %d, gone = %v", fake.deleteCalls, fake.gone)
+			}
+			return nil
+		},
+		Steps: []resource.TestStep{
+			{
+				Config:      branchConfig("  instance_class = \"d-4vcpu-16gb\""),
+				ExpectError: regexp.MustCompile(`(?s)new branch costs extra.*NGN 1500\.00.*NGN 10500\.00.*accept_price_changes = true`),
+			},
+			{
+				Config: branchConfig("  instance_class = \"d-4vcpu-16gb\"\n  accept_price_changes = true"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(name, "id", "br-1"),
+					resource.TestCheckResourceAttr(name, "state", "ready"),
+					resource.TestCheckResourceAttr(name, "instance_class", "d-4vcpu-16gb"),
+					resource.TestCheckResourceAttr(name, "accept_price_changes", "true"),
+					func(*terraform.State) error {
+						got := fmt.Sprint(fake.attempts)
+						want := "[map[from:now instance_class:d-4vcpu-16gb name:fix-checkout] map[from:now instance_class:d-4vcpu-16gb name:fix-checkout] map[confirm_charge_minor:150000 from:now instance_class:d-4vcpu-16gb name:fix-checkout]]"
+						if got != want {
+							return fmt.Errorf("create attempts = %s, want %s", got, want)
+						}
+						return nil
+					},
+				),
+			},
+			{
+				Config: branchConfig("  instance_class = \"s-2vcpu-4gb\"\n  accept_price_changes = true"),
+				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{
+					plancheck.ExpectResourceAction(name, plancheck.ResourceActionDestroyBeforeCreate),
+				}},
+				Check: resource.TestCheckResourceAttr(name, "instance_class", "s-2vcpu-4gb"),
 			},
 		},
 	})

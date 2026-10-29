@@ -20,8 +20,9 @@ type DatabaseBranchSource struct {
 }
 
 type DatabaseBranchDatabase struct {
-	PrivateHostname string         `json:"private_hostname"`
-	Sleep           *DatabaseSleep `json:"sleep"`
+	PrivateHostname string             `json:"private_hostname"`
+	Sleep           *DatabaseSleep     `json:"sleep"`
+	Dedicated       *DedicatedSettings `json:"dedicated"`
 }
 
 type DatabaseBranch struct {
@@ -56,6 +57,9 @@ type CreateDatabaseBranchRequest struct {
 	TTL               string `json:"ttl,omitempty"`
 	SleepAfterMinutes int64  `json:"sleep_after_minutes,omitempty"`
 	SourceRef         string `json:"source_ref,omitempty"`
+	InstanceClass     string `json:"instance_class,omitempty"`
+
+	ConfirmChargeMinor *int64 `json:"confirm_charge_minor,omitempty"`
 }
 
 func branchPath(parentID, suffix string) string {
