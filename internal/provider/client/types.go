@@ -247,23 +247,24 @@ type EnvVarInput struct {
 }
 
 type Database struct {
-	ID             string    `json:"id"`
-	ProjectID      *string   `json:"project_id,omitempty"`
-	UserID         string    `json:"user_id,omitempty"`
-	TargetNodeID   *string   `json:"target_node_id,omitempty"`
-	Name           string    `json:"name"`
-	Type           string    `json:"type"`
-	Version        string    `json:"version"`
-	Host           string    `json:"host,omitempty"`
-	Port           int       `json:"port,omitempty"`
-	TLSMode        string    `json:"tls_mode,omitempty"`
-	DatabaseName   string    `json:"database_name,omitempty"`
-	SizeGB         int       `json:"size_gb"`
-	Status         string    `json:"status"`
-	RuntimeKind    string    `json:"runtime_kind,omitempty"`
-	MigrationState string    `json:"migration_status,omitempty"`
-	CreatedAt      time.Time `json:"created_at,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at,omitempty"`
+	ID             string         `json:"id"`
+	ProjectID      *string        `json:"project_id,omitempty"`
+	UserID         string         `json:"user_id,omitempty"`
+	TargetNodeID   *string        `json:"target_node_id,omitempty"`
+	Name           string         `json:"name"`
+	Type           string         `json:"type"`
+	Version        string         `json:"version"`
+	Host           string         `json:"host,omitempty"`
+	Port           int            `json:"port,omitempty"`
+	TLSMode        string         `json:"tls_mode,omitempty"`
+	DatabaseName   string         `json:"database_name,omitempty"`
+	SizeGB         int            `json:"size_gb"`
+	Status         string         `json:"status"`
+	RuntimeKind    string         `json:"runtime_kind,omitempty"`
+	MigrationState string         `json:"migration_status,omitempty"`
+	CreatedAt      time.Time      `json:"created_at,omitempty"`
+	UpdatedAt      time.Time      `json:"updated_at,omitempty"`
+	Sleep          *DatabaseSleep `json:"sleep,omitempty"`
 }
 
 type CreateDatabaseRequest struct {

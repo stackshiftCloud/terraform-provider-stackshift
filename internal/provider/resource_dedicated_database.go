@@ -100,6 +100,7 @@ type dedicatedDatabaseModel struct {
 	CheckoutURL         types.String   `tfsdk:"checkout_url"`
 	RestoreFrom         types.Object   `tfsdk:"restore_from"`
 	AllowReplace        types.Bool     `tfsdk:"allow_replace"`
+	SleepAfterMinutes   types.Int64    `tfsdk:"sleep_after_minutes"`
 	Timeouts            timeouts.Value `tfsdk:"timeouts"`
 }
 
@@ -228,7 +229,8 @@ func (r *dedicatedDatabaseResource) Schema(ctx context.Context, _ resource.Schem
 			},
 			"allow_replace": schema.BoolAttribute{Optional: true, Computed: true, Default: booldefault.StaticBool(false),
 				Description: "Changing engine, version, project_id, master_username or database_name replaces the database and deletes its data, so Terraform refuses unless this is true. It doesn't apply to terraform apply -replace or taint, which you ask for explicitly. Never sent to StackShift."},
-			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{Create: true, Update: true, Delete: true}),
+			"sleep_after_minutes": sleepAfterMinutesAttribute("Sleep when idle for a PostgreSQL database: the database sleeps after this many minutes without use, 5 to 1440, and wakes on the next connection. Leave it out or set 0 to keep the database awake. Not available with hourly billing. Changes in place."),
+			"timeouts":            timeouts.Attributes(ctx, timeouts.Opts{Create: true, Update: true, Delete: true}),
 		},
 	}
 }
@@ -299,8 +301,12 @@ func (r *dedicatedDatabaseResource) ValidateConfig(ctx context.Context, req reso
 		resp.Diagnostics.AddAttributeError(path.Root("backup_retention_days"), "Unsupported value", "Keep backups for 7 to 35 days.")
 	}
 	validateUnpaddedName(ctx, req.Config, "name", &resp.Diagnostics)
+	minutes := validateSleepAfterMinutes(ctx, req.Config, &resp.Diagnostics)
 	var engine, version types.String
 	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("engine"), &engine)...)
+	if !engine.IsNull() && !engine.IsUnknown() && engine.ValueString() != "postgres" {
+		sleepOnlyForPostgres(&resp.Diagnostics, minutes)
+	}
 	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("version"), &version)...)
 	if !engine.IsNull() && !engine.IsUnknown() && engine.ValueString() != "postgres" && engine.ValueString() != "mysql" {
 		resp.Diagnostics.AddAttributeError(path.Root("engine"), "Unsupported value", "Use postgres or mysql.")
@@ -429,6 +435,12 @@ func (r *dedicatedDatabaseResource) Create(ctx context.Context, req resource.Cre
 	}
 	plan.resolveUnknown()
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	if resp.Diagnostics.HasError() || plan.SleepAfterMinutes.ValueInt64() == 0 {
+		return
+	}
+	if err := r.client.SetDatabaseSleep(ctx, plan.ID.ValueString(), plan.SleepAfterMinutes.ValueInt64()); err != nil {
+		sleepNotAppliedWarning(&resp.Diagnostics, plan.ID.ValueString(), err)
+	}
 }
 
 func (r *dedicatedDatabaseResource) createOrRestore(ctx context.Context, plan *dedicatedDatabaseModel, diags *diag.Diagnostics) (*client.DedicatedCreateResult, error) {
@@ -523,6 +535,7 @@ func (r *dedicatedDatabaseResource) Read(ctx context.Context, req resource.ReadR
 		return
 	}
 	state.applyDatabase(ctx, db, &resp.Diagnostics)
+	state.SleepAfterMinutes = sleepAfterMinutes(state.SleepAfterMinutes, db.Sleep)
 	ha, err := r.client.GetDedicatedHA(ctx, state.ID.ValueString())
 	if err != nil && !notFound(err) {
 		resp.Diagnostics.AddError("Read StackShift dedicated database failed", dedicatedErrorDetail(err))
@@ -569,6 +582,7 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 	working.Standby, working.OnStandbyLoss = state.Standby, state.OnStandbyLoss
 	working.BackupRetentionDays, working.DeletionProtection, working.MaintenanceWindow = state.BackupRetentionDays, state.DeletionProtection, state.MaintenanceWindow
 	working.Name, working.Billing = state.Name, state.Billing
+	working.SleepAfterMinutes = state.SleepAfterMinutes
 	working.Status, working.BillingStatus, working.AllocatedStorageGB = state.Status, state.BillingStatus, state.AllocatedStorageGB
 	working.resolveUnknown()
 	id := plan.ID.ValueString()
@@ -663,6 +677,14 @@ func (r *dedicatedDatabaseResource) Update(ctx context.Context, req resource.Upd
 			save()
 			return
 		}
+	}
+	if !plan.SleepAfterMinutes.Equal(state.SleepAfterMinutes) {
+		if err := r.client.SetDatabaseSleep(ctx, id, plan.SleepAfterMinutes.ValueInt64()); err != nil {
+			resp.Diagnostics.AddError("Update StackShift dedicated database sleep failed", dedicatedErrorDetail(err))
+			save()
+			return
+		}
+		working.SleepAfterMinutes = plan.SleepAfterMinutes
 	}
 	if db, err := r.client.GetDedicatedDatabase(ctx, id); err == nil {
 		working.Status = types.StringValue(db.Status)

@@ -111,12 +111,62 @@ Shape fields such as `project_id`, `type`, `version`, `size_gb`, and `target_nod
 | `version` | yes | Version accepted by StackShift. For `redis` use `"8.10"`, for `valkey` use `"9.0"`; ClickHouse accepts `"26.8"` or `"26.3"`. |
 | `size_gb` | yes | Managed database disk size. |
 | `target_node_id` | no | Optional explicit node placement target. |
+| `sleep_after_minutes` | no | Sleep when idle, for `postgres` only: the database sleeps after this many minutes without use, 5 to 1440, and wakes on the next connection. Leave it out or set `0` to keep it awake. Changes in place. It is turned on right after the database is created; if StackShift can't do that yet, the apply finishes with a warning and the next apply tries again. |
+
+Read the sleep setting back with `sleep_after_minutes`; if it is changed outside Terraform, the next plan shows the difference.
 
 ### Import
 
 ```sh
 terraform import stackshift_database.postgres <database_id>
 ```
+
+## `stackshift_database_branch`
+
+Manages a Branch of a PostgreSQL database through `/api/v1/databases/{database_id}/branches`: a separate working copy that you can change, test against and delete without touching the original. A branch is a database of its own, so it has its own connection details and its own `id`. It counts against your plan's limits on branches and on branches that are awake at once.
+
+Creating a branch waits until the branch is ready, and deleting it waits until it is gone. If StackShift can't finish the branch, the apply fails with the reason, the failed branch is deleted, and nothing is kept in state.
+
+### Arguments
+
+| Name | Required | Notes |
+| --- | --- | --- |
+| `database_id` | yes | The database to branch from: a main database or another branch. **Changing it replaces the branch.** |
+| `name` | yes | The branch's name. Changes in place. |
+| `from` | no | Where the branch's data starts from. Set exactly one of `now = true`, `time` (an RFC 3339 time inside the database's history window), `restore_point_id` or `backup_id`. Defaults to `now`. **Changing it replaces the branch.** |
+| `ttl` | no | How long the branch lives before StackShift deletes it, such as `24h` or `7d`, or `never`. Leave it out for the plan's default. Changes in place; removing it after it was set changes the branch to `never`. |
+| `sleep_after_minutes` | no | Sleep when idle for the branch, 5 to 1440 minutes. Leave it out or set `0` to keep it awake. Changes in place. |
+| `source_ref` | no | A label that says what the branch is for, such as `pr:142`. **Changing it replaces the branch.** |
+| `timeouts` | no | `create` and `delete` durations, each 45 minutes by default. |
+
+Computed attributes: `id` (the branch's own database ID), `root_database_id` (the main database it descends from), `mechanism` (`instant`, `copy`, `point_in_time` or `backup`), `state` (`creating`, `ready`, `resetting`, `promoting`, `failed`, `deleting` or `needs_recovery`), `private_hostname`, `branched_at` and `expires_at` (empty when the branch never expires).
+
+Making a branch the main database and resetting a branch are not Terraform actions. Do them from the dashboard or the API.
+
+### Connecting to a branch
+
+Read the branch's connection details with `stackshift_database_credentials`, using the branch's `id`:
+
+```hcl
+resource "stackshift_database_branch" "pr_142" {
+  database_id = stackshift_database.postgres.id
+  name        = "pr-142"
+  ttl         = "7d"
+  source_ref  = "pr:142"
+}
+
+data "stackshift_database_credentials" "pr_142" {
+  database_id = stackshift_database_branch.pr_142.id
+}
+```
+
+### Import
+
+```sh
+terraform import stackshift_database_branch.pr_142 <parent_database_id>/<branch_id>
+```
+
+Import reads the name, label, sleep setting and starting point from StackShift. It can't recover `ttl`, so the first plan after an import shows `ttl` as a change if you set it in your configuration.
 
 ## `stackshift_domain`
 
@@ -416,6 +466,7 @@ The master password is returned only once, when the database is created. It is s
 | `accept_price_changes` | no | Defaults to `false`. See paid changes below. |
 | `skip_final_snapshot` | no | Defaults to `false`, so destroy takes a final snapshot first. Set `true` to delete without one. |
 | `restore_from` | no | Creates the database as a restore of another Dedicated database. Create-only; see restoring below. |
+| `sleep_after_minutes` | no | Sleep when idle, for `postgres` only and not with hourly billing: the database sleeps after this many minutes without use, 5 to 1440, and wakes on the next connection. Leave it out or set `0` to keep it awake. Changes in place. It is turned on once the database is running; if StackShift can't do that, the apply finishes with a warning and the next apply tries again. |
 | `timeouts` | no | `create`, `update` and `delete` durations. See timeouts below. |
 
 Computed attributes: `id`, `master_password`, `allocated_storage_gb` (the current storage size, including autogrow), `status`, `host`, `port`, `endpoints` (`protocol`, `network`, `role`, `host`, `port`, `tls_mode`, `primary`; read replicas that have caught up appear with their own role), `billing_status` and `checkout_url`.

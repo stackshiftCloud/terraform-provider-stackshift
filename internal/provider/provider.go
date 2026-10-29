@@ -94,6 +94,7 @@ func (p *stackshiftProvider) Resources(_ context.Context) []func() resource.Reso
 		NewDedicatedDatabaseRestoreScheduleResource,
 		NewDedicatedDatabasePublicAccessResource,
 		NewDedicatedDatabaseInsightsResource,
+		NewDatabaseBranchResource,
 		NewBucketResource,
 		NewDomainResource,
 		NewDNSRecordResource,

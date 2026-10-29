@@ -34,6 +34,8 @@ data "stackshift_database_credentials" "postgres" {
 }
 ```
 
+Use the `id` of a `stackshift_database_branch` as `database_id` to get a branch's own connection details.
+
 All outputs are marked sensitive except `tls_server_name` and `ca_certificate`:
 
 - `username`

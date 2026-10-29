@@ -77,6 +77,8 @@ type fakeDedicatedAPI struct {
 	deleting        bool
 	deleteReads     int
 	createCount     int
+	sleep           map[string]any
+	sleepPuts       []map[string]any
 }
 
 func (f *fakeDedicatedAPI) database() map[string]any {
@@ -94,9 +96,13 @@ func (f *fakeDedicatedAPI) database() map[string]any {
 	if name == "" {
 		name = "orders"
 	}
-	return map[string]any{"id": "db-1", "tier": "dedicated", "dedicated": dedicated, "name": name, "type": engine, "version": version, "status": f.status,
+	database := map[string]any{"id": "db-1", "tier": "dedicated", "dedicated": dedicated, "name": name, "type": engine, "version": version, "status": f.status,
 		"host": "db-1.stackshift.internal", "port": 5432, "tls_mode": "require", "database_name": "app",
 		"endpoints": []map[string]any{{"protocol": engine, "network": "private", "role": "primary", "host": "db-1.stackshift.internal", "port": 5432, "tls_mode": "require", "primary": true}}}
+	if f.sleep != nil {
+		database["sleep"] = f.sleep
+	}
+	return database
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
@@ -211,6 +217,13 @@ func (f *fakeDedicatedAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.settings[key] = value
 		}
 		writeOK(w, http.StatusOK, f.database())
+	case "PUT /databases/db-1/sleep":
+		f.sleepPuts = append(f.sleepPuts, body)
+		f.sleep = map[string]any{"enabled": body["enabled"] == true, "after_minutes": 5, "state": "awake"}
+		if body["enabled"] == true {
+			f.sleep["after_minutes"] = body["after_minutes"]
+		}
+		writeOK(w, http.StatusOK, f.sleep)
 	case "GET /databases/db-1/billing":
 		status := "active"
 		if f.status == "pending_payment" {

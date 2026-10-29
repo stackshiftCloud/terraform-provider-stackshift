@@ -16,6 +16,7 @@ import (
 var _ resource.Resource = (*databaseResource)(nil)
 var _ resource.ResourceWithConfigure = (*databaseResource)(nil)
 var _ resource.ResourceWithImportState = (*databaseResource)(nil)
+var _ resource.ResourceWithValidateConfig = (*databaseResource)(nil)
 
 func NewDatabaseResource() resource.Resource { return &databaseResource{} }
 
@@ -35,6 +36,8 @@ type databaseModel struct {
 	TLSMode      types.String `tfsdk:"tls_mode"`
 	DatabaseName types.String `tfsdk:"database_name"`
 	CreatedAt    types.String `tfsdk:"created_at"`
+
+	SleepAfterMinutes types.Int64 `tfsdk:"sleep_after_minutes"`
 }
 
 func (r *databaseResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
@@ -66,7 +69,18 @@ func (r *databaseResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"tls_mode":       schema.StringAttribute{Computed: true},
 			"database_name":  schema.StringAttribute{Computed: true},
 			"created_at":     schema.StringAttribute{Computed: true},
+
+			"sleep_after_minutes": sleepAfterMinutesAttribute("Sleep when idle for a PostgreSQL database: the database sleeps after this many minutes without use, 5 to 1440, and wakes on the next connection. Leave it out or set 0 to keep the database awake. Changes in place."),
 		},
+	}
+}
+
+func (r *databaseResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	minutes := validateSleepAfterMinutes(ctx, req.Config, &resp.Diagnostics)
+	var databaseType types.String
+	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, path.Root("type"), &databaseType)...)
+	if !databaseType.IsUnknown() && databaseType.ValueString() != "postgres" {
+		sleepOnlyForPostgres(&resp.Diagnostics, minutes)
 	}
 }
 
@@ -89,6 +103,12 @@ func (r *databaseResource) Create(ctx context.Context, req resource.CreateReques
 	}
 	plan.applyDatabase(db)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	if resp.Diagnostics.HasError() || plan.SleepAfterMinutes.ValueInt64() == 0 {
+		return
+	}
+	if err := r.client.SetDatabaseSleep(ctx, db.ID, plan.SleepAfterMinutes.ValueInt64()); err != nil {
+		sleepNotAppliedWarning(&resp.Diagnostics, db.ID, err)
+	}
 }
 
 func (r *databaseResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -107,13 +127,28 @@ func (r *databaseResource) Read(ctx context.Context, req resource.ReadRequest, r
 		return
 	}
 	state.applyDatabase(db)
+	state.SleepAfterMinutes = sleepAfterMinutes(state.SleepAfterMinutes, db.Sleep)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
 func (r *databaseResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan databaseModel
+	var plan, state databaseModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !plan.SleepAfterMinutes.Equal(state.SleepAfterMinutes) {
+		if err := r.client.SetDatabaseSleep(ctx, state.ID.ValueString(), plan.SleepAfterMinutes.ValueInt64()); err != nil {
+			resp.Diagnostics.AddError("Update StackShift database sleep failed", err.Error())
+			return
+		}
+		state.SleepAfterMinutes = plan.SleepAfterMinutes
+	}
+	if db, err := r.client.GetDatabase(ctx, state.ID.ValueString()); err == nil {
+		state.applyDatabase(db)
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
 func (r *databaseResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

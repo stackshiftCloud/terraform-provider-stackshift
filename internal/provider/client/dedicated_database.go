@@ -99,6 +99,7 @@ type DedicatedDatabase struct {
 	Status       string             `json:"status"`
 	ErrorMessage *string            `json:"error_message,omitempty"`
 	Endpoints    []DatabaseEndpoint `json:"endpoints"`
+	Sleep        *DatabaseSleep     `json:"sleep,omitempty"`
 }
 
 type DatabaseCheckout struct {
