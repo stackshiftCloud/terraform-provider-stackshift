@@ -107,8 +107,8 @@ Shape fields such as `project_id`, `type`, `version`, `size_gb`, and `target_nod
 | --- | --- | --- |
 | `project_id` | yes | Owning project ID. |
 | `name` | yes | Database name. |
-| `type` | yes | `postgres`, `mysql`, `mariadb`, `clickhouse`, `redis` (Redis 8), or `valkey` (Valkey 9, Redis-compatible). |
-| `version` | yes | Version accepted by StackShift. For `redis` use `"8.10"`, for `valkey` use `"9.0"`; ClickHouse accepts `"26.8"` or `"26.3"`. |
+| `type` | yes | `postgres`, `mysql`, `mariadb`, `clickhouse`, `mongodb`, `redis` (Redis 8), or `valkey` (Valkey 9, Redis-compatible). |
+| `version` | yes | Version accepted by StackShift. For `redis` use `"8.10"`, for `valkey` use `"9.0"`; ClickHouse accepts `"26.8"` or `"26.3"`; for `mongodb` use `"8.0"`. |
 | `size_gb` | yes | Managed database disk size. |
 | `target_node_id` | no | Optional explicit node placement target. |
 | `sleep_after_minutes` | no | Sleep when idle, for `postgres` only: the database sleeps after this many minutes without use, 5 to 1440, and wakes on the next connection. Leave it out or set `0` to keep it awake. Changes in place. It is turned on right after the database is created; if StackShift can't do that yet, the apply finishes with a warning and the next apply tries again. |
